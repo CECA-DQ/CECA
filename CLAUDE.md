@@ -15,6 +15,8 @@ The product takes raw video as input (press conferences, events, archive footage
 
 Target users are television newsrooms. The commercial goal is to sell the product to roughly one hundred broadcasters, so the architecture is multi-tenant from day one.
 
+The frontend lives in a separate repository and communicates with this API over HTTP.
+
 In the current phase the media asset manager is mocked. Real integration with AVID (MediaCentral, NEXIS, Interplay) will arrive once the first client is signed. The codebase is structured so that this transition is a matter of swapping an adapter, not rewriting the application.
 
 ## 2. Technical philosophy
@@ -45,27 +47,11 @@ When you install or upgrade something, stick to these versions unless explicitly
 - uv as the package manager (not pip, not poetry)
 - pytest + pytest-asyncio for tests
 
-**Frontend**
-- Next.js 15 with the App Router
-- TypeScript in strict mode
-- Tailwind CSS 4
-- shadcn/ui for base components
-- Auth.js v5 for authentication
-- TanStack Query for server state
-- Zustand for client state when needed
-- pnpm as the package manager
-
-**Composition service**
-- Node.js 20+
-- Remotion for declarative video composition
-- TypeScript
-
 **Data**
 - PostgreSQL 16 with the pgvector extension
 - Redis 7 for Celery and cache
 
 **Cloud**
-- Vercel for the frontend
 - Railway or Fly.io for api and workers
 - Cloudflare R2 for file storage
 - Neon or Railway Postgres for managed database
@@ -78,69 +64,49 @@ When you install or upgrade something, stick to these versions unless explicitly
 
 ## 4. Folder structure
 
-Full monorepo structure. If you need to create a new file, find the place that already exists for it before inventing a new one.
+The frontend lives in a separate repository. If you need to create a new file, find the place that already exists for it before inventing a new one.
 
 ```
-asistente-tv/
+CECA/
 ├── apps/
-│   ├── web/                        Next.js frontend
-│   ├── api/                        FastAPI backend
-│   └── composer/                   Remotion service
-├── packages/
-│   ├── shared-types/               Shared TS types
-│   └── shared-config/              Shared configs
-├── infra/                          Docker, Railway, Vercel
-├── data/                           Not in git: samples, outputs
-├── docs/                           ARCHITECTURE, DECISIONS, DEMO_SCRIPT
+│   └── api/                        FastAPI backend
+│       ├── src/
+│       │   ├── main.py             Entry point
+│       │   ├── config.py           Settings via pydantic-settings
+│       │   ├── routes/             HTTP endpoints, one per domain
+│       │   ├── core/               Auth, logging, errors, tenant, observability
+│       │   ├── models/             SQLAlchemy + Pydantic models
+│       │   ├── db/                 Session, migrations
+│       │   ├── services/           Business logic
+│       │   ├── adapters/           Swappable abstractions
+│       │   │   ├── llm/            LLMProvider
+│       │   │   ├── stt/            Speech to text
+│       │   │   ├── tts/            Text to speech
+│       │   │   ├── mam/            Media asset manager
+│       │   │   ├── storage/        Files
+│       │   │   └── vector/         Vector store
+│       │   ├── workers/            Celery tasks
+│       │   └── prompts/            Versioned prompts in markdown
+│       ├── tests/
+│       │   ├── unit/
+│       │   ├── integration/
+│       │   ├── e2e/
+│       │   └── fixtures/           Adapter stubs
+│       ├── pyproject.toml
+│       └── alembic.ini
+├── infra/
+│   ├── docker/                     Dockerfiles
+│   ├── docker-compose.yml          Local dev (postgres + redis)
+│   ├── .env.example
+│   └── deploy/                     Railway/Fly configs
+├── data/                           Not in git: videos, seeds
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── API.md
+│   ├── DEMO_SCRIPT.md
+│   └── DECISIONS/
 ├── scripts/                        Operational utilities
 └── .github/workflows/              CI and deploys
-```
-
-Backend detail:
-
-```
-apps/api/src/
-├── main.py                         Entry point
-├── config.py                       Settings via pydantic-settings
-├── routes/                         HTTP endpoints, one per domain
-├── core/                           Auth, logging, errors, tenant
-├── models/                         SQLAlchemy + Pydantic models
-├── db/                             Session, migrations, seeds
-├── orchestrator/                   The brain
-│   ├── pipeline.py                 Main orchestrator
-│   ├── steps/                      One step per file
-│   └── state.py                    Pipeline state
-├── services/                       Business logic
-├── adapters/                       Swappable abstractions
-│   ├── llm/                        LLMProvider
-│   ├── stt/                        Speech to text
-│   ├── tts/                        Text to speech
-│   ├── mam/                        Media asset manager
-│   ├── storage/                    Files
-│   └── vector/                     Vector store
-├── workers/                        Celery tasks
-└── prompts/                        Versioned prompts in markdown
-```
-
-Frontend detail:
-
-```
-apps/web/
-├── app/
-│   ├── (marketing)/                Public landing
-│   ├── (app)/                      Protected app
-│   │   ├── projects/               Projects list and detail
-│   │   └── library/                Pieces library
-│   └── api/                        BFF routes if needed
-├── components/
-│   ├── ui/                         shadcn base
-│   ├── upload/                     Video upload
-│   ├── pipeline/                   Progress visualization
-│   ├── editor/                     Human review
-│   └── package/                    Editorial package display
-├── lib/                            API client, auth, utils
-├── hooks/                          Custom hooks
-└── types/                          Shared types
 ```
 
 ## 5. The adapter pattern. The most important decision
@@ -386,14 +352,6 @@ class EditorialService:
 - Relative imports inside a package, absolute imports across packages.
 - Functions under 50 lines. Files under 300. If you exceed, refactor.
 
-### TypeScript
-
-- Strict mode enabled. No any unless extreme cases justified with a comment.
-- Server components by default; client components only when interactivity or hooks are needed.
-- Server state via TanStack Query, not useEffect plus fetch.
-- Shared types with the backend live in packages/shared-types, generated from the Pydantic models with datamodel-code-generator.
-- Small, composable components. If a component exceeds 200 lines, split it.
-
 ### Naming
 
 - REST endpoints in plural: /projects, /videos, /segments.
@@ -632,7 +590,7 @@ uv run pytest --cov=src             # with coverage
 
 ```bash
 # 1. Infrastructure services
-docker compose up -d                # postgres + redis
+docker compose -f infra/docker-compose.yml up -d    # postgres + redis
 
 # 2. Backend
 cd apps/api
@@ -644,16 +602,6 @@ uv run uvicorn src.main:app --reload --port 8000
 # 3. Worker (in another terminal)
 cd apps/api
 uv run celery -A src.workers.celery_app worker --loglevel=info
-
-# 4. Frontend
-cd apps/web
-pnpm install
-pnpm dev                            # starts on :3000
-
-# 5. Composer
-cd apps/composer
-pnpm install
-pnpm dev                            # starts on :4000
 ```
 
 ### Environment variables
@@ -671,8 +619,6 @@ A .env.example file lives under infra/. Copy it to .env in each app that needs i
 - STORAGE_PROVIDER (r2 / local)
 
 ## 14. Deployment
-
-**Frontend**: pushing to main triggers an automatic Vercel deploy.
 
 **Backend and workers**: Railway with Dockerfile. Push to main triggers build and deploy. Health check at /healthz.
 
