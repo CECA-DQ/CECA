@@ -58,19 +58,44 @@ Generates text, analyses images, produces editorial content.
 
 ---
 
-### STT — Speech to Text (`adapters/stt/`) *(pending)*
+### STT — Speech to Text (`adapters/stt/`)
 
-Transcribes audio with timestamps and speaker diarization.
+Transcribes audio bytes into text with per-segment timestamps and optional speaker diarization.
 
-**Planned implementations:** Whisper API, Whisper local.
+**Interface (`STTProvider`):**
+- `transcribe(audio, language, with_timestamps, with_diarization)` → `Transcript`
+
+**Returns:**
+- `Transcript` — contains `language`, `full_text`, and a list of `TranscriptSegment` (each with `start`, `end`, `text`, `speaker`)
+
+**Implementations:**
+- `MockSTTProvider` — returns a fixed 4-segment transcript in Spanish. Used in all unit tests.
+- `WhisperAPIProvider` — calls OpenAI Whisper API (`whisper-1`) with `verbose_json` format to get per-segment timestamps. Diarization not supported natively by Whisper — wire `pyannote-audio` separately when needed.
+
+**Env var:** `STT_PROVIDER=mock` or `STT_PROVIDER=whisper_api`
+
+**Note:** The mock simulates two speakers (`speaker_0`, `speaker_1`). The Whisper implementation raises `NotImplementedError` if `with_diarization=True`.
 
 ---
 
-### TTS — Text to Speech (`adapters/tts/`) *(pending)*
+### TTS — Text to Speech (`adapters/tts/`)
 
-Converts the voiceover script to audio.
+Converts the voiceover script into mp3 audio bytes, ready to be mixed into the final video.
 
-**Planned implementations:** ElevenLabs, OpenAI TTS.
+**Interface (`TTSProvider`):**
+- `synthesize(text, voice_id, language)` → `SynthesisResult`
+- `estimate_cost(character_count)` → float (USD)
+
+**Returns:**
+- `SynthesisResult` — contains `audio` (raw mp3 bytes), `duration_seconds`, and `voice_id`
+
+**Implementations:**
+- `MockTTSProvider` — returns empty bytes and estimates duration from word count (150 wpm). Cost is always 0. Used in all unit tests.
+- `ElevenLabsProvider` — calls ElevenLabs API with model `eleven_multilingual_v2`, output format `mp3_44100_128`. Streams audio chunks and joins them. Cost estimated at ~$0.30 per 1000 characters (Creator plan).
+
+**Env var:** `TTS_PROVIDER=mock` or `TTS_PROVIDER=elevenlabs`
+
+**Note:** ElevenLabs does not return audio duration in the API response — it is estimated from word count.
 
 ---
 
