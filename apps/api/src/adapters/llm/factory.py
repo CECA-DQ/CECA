@@ -2,6 +2,7 @@ from src.config import settings
 
 from .base import LLMProvider
 from .claude import ClaudeProvider
+from .groq import GroqProvider
 from .openai import OpenAIProvider
 
 
@@ -10,6 +11,11 @@ def get_llm_provider() -> LLMProvider:
         case "claude":
             return ClaudeProvider(
                 api_key=settings.anthropic_api_key,
+                default_model=settings.llm_default_model,
+            )
+        case "groq":
+            return GroqProvider(
+                api_key=settings.groq_api_key,
                 default_model=settings.llm_default_model,
             )
         case "openai":

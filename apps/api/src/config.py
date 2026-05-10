@@ -11,12 +11,13 @@ class Settings(BaseSettings):
     # AI providers
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    groq_api_key: str = ""
     elevenlabs_api_key: str = ""
     voyage_api_key: str = ""
 
     # Adapter selection
-    llm_provider: str = "claude"          # claude | openai
-    llm_default_model: str = "claude-opus-4-6"
+    llm_provider: str = "groq"            # groq | claude | openai
+    llm_default_model: str = "llama-3.3-70b-versatile"
     mam_provider: str = "mock"            # mock | avid
     storage_provider: str = "local"       # local | r2
     stt_provider: str = "whisper_api"     # whisper_api | whisper_local

@@ -99,19 +99,47 @@ Converts the voiceover script into mp3 audio bytes, ready to be mixed into the f
 
 ---
 
-### Storage (`adapters/storage/`) *(pending)*
+### Storage (`adapters/storage/`)
 
-Stores and retrieves video files and generated assets.
+Stores and retrieves binary files: raw video, extracted audio, generated voiceover, and the final MP4.
 
-**Planned implementations:** Local filesystem (dev), Cloudflare R2 (production).
+**Interface (`StorageAdapter`):**
+- `upload(key, data, content_type)` → key
+- `download(key)` → bytes
+- `delete(key)` → None
+- `exists(key)` → bool
+
+**Key convention:** `{tenant_id}/{project_id}/{filename}` — tenant isolation is enforced at the key level.
+
+**Implementations:**
+- `LocalStorageAdapter` — writes to `data/storage/` on disk. Includes path traversal protection. For development only.
+- `R2StorageAdapter` — Cloudflare R2 via the S3-compatible API (`aioboto3`). Used in production.
+
+**Env var:** `STORAGE_PROVIDER=local` or `STORAGE_PROVIDER=r2`
+
+**Note:** `data/storage/` is in `.gitignore`. Never commit stored files.
 
 ---
 
-### Vector (`adapters/vector/`) *(pending)*
+### Vector (`adapters/vector/`)
 
-Stores and queries content embeddings for semantic search.
+Stores content embeddings and retrieves the most semantically similar entries for a given query. Used to build the content queue and suggest related pieces.
 
-**Planned implementations:** pgvector (PostgreSQL extension).
+**Interface (`VectorAdapter`):**
+- `index(id, text, tenant_id, metadata)` → None
+- `search(query, tenant_id, limit)` → list of `SearchResult`
+- `delete(id, tenant_id)` → None
+
+**Returns:**
+- `SearchResult` — contains `id`, `score` (cosine similarity, 0.0–1.0), and `metadata`
+
+**Implementations:**
+- `MockVectorAdapter` — in-memory store with substring matching as a proxy for similarity. Score is 1.0 for exact match, 0.5 for partial. Used in all unit tests.
+- `PgVectorAdapter` — stores embeddings in PostgreSQL using the `pgvector` extension. Embeddings are generated via Voyage AI or Cohere (to be wired when implementing). Pending implementation.
+
+**Env var:** `VECTOR_PROVIDER=mock` or `VECTOR_PROVIDER=pgvector`
+
+**Note:** The mock does not generate real embeddings. The pgvector implementation will require a `content_embeddings` table migration and an embeddings API key.
 
 ## Adding a new provider
 

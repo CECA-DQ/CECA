@@ -13,6 +13,7 @@ dependencies = [
     "redis",
     "asyncpg",
     "anthropic",
+    "groq",
     "openai",
     "elevenlabs",
     "pgvector",
