@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     storage_provider: str = "local"       # local | r2
     stt_provider: str = "whisper_api"     # whisper_api | whisper_local
     tts_provider: str = "elevenlabs"      # elevenlabs | openai_tts
+    vector_provider: str = "mock"         # mock | pgvector
 
     # Cloudflare R2
     r2_account_id: str = ""

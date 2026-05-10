@@ -16,6 +16,7 @@ dependencies = [
     "openai",
     "elevenlabs",
     "pgvector",
+    "aioboto3",
     "jinja2",
     "python-multipart",
     "structlog",
