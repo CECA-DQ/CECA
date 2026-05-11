@@ -1,7 +1,8 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,6 +95,10 @@ class EditorialPackageOut(BaseModel):
     voiceover_audio_key: str | None
     composed_video_key: str | None
     created_at: datetime
+    # Computed fields — not stored in DB, added by the route handler
+    article: str | None = None
+    angles: list | None = None
+    video_url: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -255,7 +260,7 @@ async def get_results(
     project_id: UUID,
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(_get_session),
-) -> EditorialPackage:
+) -> EditorialPackageOut:
     await _get_or_404(session, project_id, tenant_id)
 
     pkg = await session.scalar(
@@ -266,7 +271,64 @@ async def get_results(
     )
     if pkg is None:
         raise HTTPException(status_code=404, detail="Results not ready yet")
-    return pkg
+
+    out = EditorialPackageOut.model_validate(pkg)
+    # Frontend expects "article" and "angles" — map from DB column names
+    out.article = pkg.web_article
+    out.angles = pkg.angle_proposals
+
+    # Only set video_url if the file actually exists in storage
+    if pkg.composed_video_key:
+        from src.adapters.storage.factory import get_storage_adapter
+        if await get_storage_adapter().exists(pkg.composed_video_key):
+            out.video_url = f"/projects/{project_id}/video?tenant={tenant_id}"  # relative — frontend prepends API base URL
+
+    return out
+
+
+@router.get("/{project_id}/video")
+async def get_video(
+    project_id: UUID,
+    x_tenant_id: str = Header(default=""),
+    tenant: str = Query(default=""),
+    session: AsyncSession = Depends(_get_session),
+) -> StreamingResponse:
+    """Stream the composed MP4 for a project.
+
+    Accepts tenant identity from the X-Tenant-ID header OR the ?tenant= query
+    param so the browser <video> element (which cannot set headers) can use it.
+    """
+    effective_tenant = (x_tenant_id or tenant).strip()
+    if not effective_tenant:
+        raise HTTPException(status_code=401, detail="Tenant identity required")
+    await _get_or_404(session, project_id, effective_tenant)
+
+    pkg = await session.scalar(
+        select(EditorialPackage).where(
+            EditorialPackage.project_id == project_id,
+            EditorialPackage.tenant_id == effective_tenant,
+        )
+    )
+    if pkg is None or not pkg.composed_video_key:
+        raise HTTPException(status_code=404, detail="Video not ready yet")
+
+    from src.adapters.storage.factory import get_storage_adapter
+    storage = get_storage_adapter()
+
+    if not await storage.exists(pkg.composed_video_key):
+        raise HTTPException(status_code=404, detail="Video file not found in storage")
+
+    video_bytes = await storage.download(pkg.composed_video_key)
+
+    return StreamingResponse(
+        iter([video_bytes]),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f"inline; filename=\"project_{project_id}.mp4\"",
+            "Content-Length": str(len(video_bytes)),
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
