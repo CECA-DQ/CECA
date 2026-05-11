@@ -1,12 +1,11 @@
-"""Whisper API STT provider with automatic chunking for large files.
+"""Groq Whisper STT provider.
 
-The OpenAI Whisper API rejects files larger than 25 MB. For longer recordings
-(40-minute interviews, press conferences) we split the audio into 10-minute
-chunks with FFmpeg, transcribe each chunk, and stitch the results together
-adjusting timestamps with the chunk's time offset.
+Uses Groq's whisper-large-v3 model via the Groq API. The response format is
+identical to OpenAI's Whisper API, so the same parsing logic applies.
+Groq Whisper is free within the standard rate limits and typically faster
+than OpenAI's whisper-1.
 
-If FFmpeg is not available, the file is sent as-is. The API will reject it if
-it exceeds the limit, and the caller should handle the error.
+Chunking for files > 24 MB reuses the same FFmpeg-based logic as WhisperAPIProvider.
 """
 
 import asyncio
@@ -15,25 +14,26 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 
 from .base import STTProvider, Transcript, TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
-_WHISPER_MAX_BYTES = 24 * 1024 * 1024  # 24 MB (leave 1 MB margin)
-_CHUNK_DURATION_SECONDS = 600           # 10-minute chunks
+_GROQ_MAX_BYTES = 24 * 1024 * 1024   # 24 MB
+_CHUNK_DURATION_SECONDS = 600         # 10-minute chunks
+_MODEL = "whisper-large-v3-turbo"     # faster + cheaper; use whisper-large-v3 for max accuracy
 
 
-class WhisperAPIProvider(STTProvider):
-    """Transcription via OpenAI Whisper API (whisper-1).
+class GroqWhisperProvider(STTProvider):
+    """Transcription via Groq Whisper API (whisper-large-v3-turbo).
 
-    Automatically splits audio > 24 MB into 10-minute chunks and stitches
-    the transcriptions with correct time offsets.
+    Drop-in replacement for WhisperAPIProvider. Automatically chunks
+    audio files larger than 24 MB into 10-minute segments.
     """
 
     def __init__(self, api_key: str) -> None:
-        self._client = AsyncOpenAI(api_key=api_key)
+        self._client = AsyncGroq(api_key=api_key)
 
     async def transcribe(
         self,
@@ -43,9 +43,9 @@ class WhisperAPIProvider(STTProvider):
         with_diarization: bool = False,
     ) -> Transcript:
         if with_diarization:
-            raise NotImplementedError("Diarization not yet supported for WhisperAPIProvider")
+            raise NotImplementedError("Diarization not yet supported for GroqWhisperProvider")
 
-        if len(audio) > _WHISPER_MAX_BYTES:
+        if len(audio) > _GROQ_MAX_BYTES:
             logger.info(
                 "Audio is %d MB — splitting into %d-second chunks",
                 len(audio) // (1024 * 1024),
@@ -63,23 +63,28 @@ class WhisperAPIProvider(STTProvider):
         offset_seconds: float,
     ) -> Transcript:
         response = await self._client.audio.transcriptions.create(
-            model="whisper-1",
+            model=_MODEL,
             file=("audio.mp3", audio, "audio/mpeg"),
             language=language,
             response_format="verbose_json",
             timestamp_granularities=["segment"] if with_timestamps else [],
         )
 
+        # Groq returns segments as dicts; OpenAI returns objects — handle both.
+        def _val(seg, key):
+            return seg[key] if isinstance(seg, dict) else getattr(seg, key)
+
         segments = [
             TranscriptSegment(
-                start=seg.start + offset_seconds,
-                end=seg.end + offset_seconds,
-                text=seg.text.strip(),
+                start=_val(seg, "start") + offset_seconds,
+                end=_val(seg, "end") + offset_seconds,
+                text=_val(seg, "text").strip(),
             )
             for seg in (response.segments or [])
         ]
 
-        return Transcript(language=response.language or language or "es", segments=segments)
+        lang = response.language if not isinstance(response, dict) else response.get("language")
+        return Transcript(language=lang or language or "es", segments=segments)
 
     async def _transcribe_chunked(
         self,
@@ -87,14 +92,13 @@ class WhisperAPIProvider(STTProvider):
         language: str | None,
         with_timestamps: bool,
     ) -> Transcript:
-        """Split audio into chunks, transcribe each, merge results."""
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
-            logger.warning("ffmpeg not found — sending oversized audio to Whisper API directly")
+            logger.warning("ffmpeg not found — sending oversized audio to Groq Whisper directly")
             return await self._transcribe_single(audio, language, with_timestamps, offset_seconds=0.0)
 
         chunks = await _split_audio_chunks(audio, ffmpeg, _CHUNK_DURATION_SECONDS)
-        logger.info("Split audio into %d chunks", len(chunks))
+        logger.info("Split audio into %d chunks for Groq Whisper", len(chunks))
 
         all_segments: list[TranscriptSegment] = []
         detected_language: str = language or "es"
@@ -113,10 +117,6 @@ async def _split_audio_chunks(
     ffmpeg: str,
     chunk_duration: int,
 ) -> list[tuple[bytes, float]]:
-    """Split mp3 bytes into fixed-duration chunks using FFmpeg segment muxer.
-
-    Returns list of (chunk_bytes, start_offset_seconds).
-    """
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = Path(tmpdir) / "input.mp3"
         input_path.write_bytes(audio)
@@ -137,9 +137,7 @@ async def _split_audio_chunks(
             raise RuntimeError(f"ffmpeg segment split failed: {stderr.decode()[-500:]}")
 
         chunk_files = sorted(Path(tmpdir).glob("chunk_*.mp3"))
-        chunks: list[tuple[bytes, float]] = []
-        for i, chunk_file in enumerate(chunk_files):
-            offset = i * chunk_duration
-            chunks.append((chunk_file.read_bytes(), float(offset)))
-
-        return chunks
+        return [
+            (chunk_file.read_bytes(), float(i * chunk_duration))
+            for i, chunk_file in enumerate(chunk_files)
+        ]

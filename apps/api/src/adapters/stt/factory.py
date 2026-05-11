@@ -1,6 +1,7 @@
 from src.config import settings
 
 from .base import STTProvider
+from .groq_whisper import GroqWhisperProvider
 from .mock import MockSTTProvider
 from .whisper import WhisperAPIProvider
 
@@ -12,5 +13,7 @@ def get_stt_provider() -> STTProvider:
             return MockSTTProvider()
         case "whisper_api":
             return WhisperAPIProvider(api_key=settings.openai_api_key)
+        case "groq_whisper":
+            return GroqWhisperProvider(api_key=settings.groq_api_key)
         case _:
             raise ValueError(f"Unknown STT provider: {settings.stt_provider!r}")

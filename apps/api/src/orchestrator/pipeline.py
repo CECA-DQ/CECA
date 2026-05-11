@@ -51,10 +51,13 @@ class Pipeline:
             # Run was pre-created by the HTTP endpoint; just mark it as running.
             await self._finish_run(pipeline_run_id, tenant_id, RunStatus.running)
 
+        video_key = await self._load_video_key(project_id, tenant_id)
+
         state = PipelineState(
             project_id=project_id,
             tenant_id=tenant_id,
             pipeline_run_id=pipeline_run_id,
+            video_key=video_key,
         )
 
         try:
@@ -141,6 +144,18 @@ class Pipeline:
             if error is not None:
                 row.error_message = error
             await session.commit()
+
+    async def _load_video_key(self, project_id: UUID, tenant_id: str) -> str:
+        """Load the video_key registered for this project from the DB."""
+        from src.models.project import Project
+        async with tenant_session(tenant_id) as session:
+            project = await session.scalar(
+                select(Project).where(
+                    Project.id == project_id,
+                    Project.tenant_id == tenant_id,
+                )
+            )
+            return project.video_key or "" if project else ""
 
     async def _finish_run(
         self, pipeline_run_id: UUID, tenant_id: str, status: RunStatus

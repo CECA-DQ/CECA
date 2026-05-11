@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     llm_default_model: str = "llama-3.3-70b-versatile"
     mam_provider: str = "mock"            # mock | avid
     storage_provider: str = "local"       # local | r2
-    stt_provider: str = "whisper_api"     # whisper_api | whisper_local
+    stt_provider: str = "groq_whisper"    # groq_whisper | whisper_api | mock
     tts_provider: str = "elevenlabs"      # elevenlabs | openai_tts
     vector_provider: str = "mock"         # mock | pgvector
 

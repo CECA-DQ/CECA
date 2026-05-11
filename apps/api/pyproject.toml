@@ -21,6 +21,8 @@ dependencies = [
     "jinja2",
     "python-multipart",
     "structlog",
+    "httpx",
+    "yt-dlp",
 ]
 
 [dependency-groups]
