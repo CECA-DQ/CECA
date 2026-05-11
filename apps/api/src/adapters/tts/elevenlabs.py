@@ -25,15 +25,14 @@ class ElevenLabsProvider(TTSProvider):
         language: str = "es",
     ) -> SynthesisResult:
         audio_chunks: list[bytes] = []
-
-        async for chunk in await self._client.generate(
+        async for chunk in self._client.text_to_speech.convert(
+            voice_id=voice_id,
             text=text,
-            voice=voice_id,
-            model="eleven_multilingual_v2",
+            model_id="eleven_multilingual_v2",
             output_format="mp3_44100_128",
         ):
-            audio_chunks.append(chunk)
-
+            if chunk:
+                audio_chunks.append(chunk)
         audio = b"".join(audio_chunks)
 
         # ElevenLabs does not return duration — estimate from character count

@@ -76,6 +76,7 @@ async def _extract_audio_youtube(url: str) -> bytes:
 
         # yt-dlp is a blocking CLI — run in a thread to keep the event loop free
         def _run() -> None:
+            from src.config import settings
             import yt_dlp  # type: ignore[import]
             ydl_opts = {
                 "format": "bestaudio/best",
@@ -88,6 +89,9 @@ async def _extract_audio_youtube(url: str) -> bytes:
                 "quiet": True,
                 "no_warnings": True,
             }
+            cookies = settings.ytdlp_cookies_path
+            if cookies:
+                ydl_opts["cookiefile"] = str(cookies)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
@@ -155,8 +159,12 @@ async def get_video_metadata_from_url(url: str) -> dict:
 async def _metadata_youtube(url: str) -> dict:
     """Extract metadata from YouTube without downloading video."""
     def _run() -> dict:
+        from src.config import settings
         import yt_dlp  # type: ignore[import]
         ydl_opts = {"quiet": True, "no_warnings": True}
+        cookies = settings.ytdlp_cookies_path
+        if cookies:
+            ydl_opts["cookiefile"] = str(cookies)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
         return {

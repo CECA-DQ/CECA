@@ -112,17 +112,21 @@ async def _compose(
 
 async def _download_video(url: str, tmpdir: Path) -> Path:
     """Download video at 720p using yt-dlp."""
+    from src.config import settings
     out_template = str(tmpdir / "source.%(ext)s")
 
     def _run() -> None:
         import yt_dlp  # type: ignore[import]
         ydl_opts = {
-            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
+            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "outtmpl": out_template,
             "quiet": True,
             "no_warnings": True,
             "merge_output_format": "mp4",
         }
+        cookies = settings.ytdlp_cookies_path
+        if cookies:
+            ydl_opts["cookiefile"] = str(cookies)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 

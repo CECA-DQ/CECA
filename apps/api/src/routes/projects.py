@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +99,7 @@ class EditorialPackageOut(BaseModel):
     article: str | None = None
     angles: list | None = None
     video_url: str | None = None
+    voiceover_url: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -277,11 +278,16 @@ async def get_results(
     out.article = pkg.web_article
     out.angles = pkg.angle_proposals
 
+    from src.adapters.storage.factory import get_storage_adapter
+    storage = get_storage_adapter()
+
     # Only set video_url if the file actually exists in storage
-    if pkg.composed_video_key:
-        from src.adapters.storage.factory import get_storage_adapter
-        if await get_storage_adapter().exists(pkg.composed_video_key):
-            out.video_url = f"/projects/{project_id}/video?tenant={tenant_id}"  # relative — frontend prepends API base URL
+    if pkg.composed_video_key and await storage.exists(pkg.composed_video_key):
+        out.video_url = f"/projects/{project_id}/video?tenant={tenant_id}"
+
+    # Only set voiceover_url if the audio file exists in storage
+    if pkg.voiceover_audio_key and await storage.exists(pkg.voiceover_audio_key):
+        out.voiceover_url = f"/projects/{project_id}/voiceover?tenant={tenant_id}"
 
     return out
 
@@ -326,14 +332,60 @@ async def get_video(
     if not await storage.exists(pkg.composed_video_key):
         raise HTTPException(status_code=404, detail="Video file not found in storage")
 
+    from fastapi import Request
     video_bytes = await storage.download(pkg.composed_video_key)
+    total = len(video_bytes)
 
-    return StreamingResponse(
-        iter([video_bytes]),
+    return Response(
+        content=video_bytes,
         media_type="video/mp4",
         headers={
             "Content-Disposition": f"inline; filename=\"project_{project_id}.mp4\"",
-            "Content-Length": str(len(video_bytes)),
+            "Content-Length": str(total),
+            "Accept-Ranges": "bytes",
+        },
+    )
+
+
+@router.get("/{project_id}/voiceover")
+async def get_voiceover(
+    project_id: UUID,
+    x_tenant_id: str = Header(default=""),
+    tenant: str = Query(default=""),
+) -> StreamingResponse:
+    """Stream the voiceover MP3 for a project.
+
+    Accepts tenant identity from the X-Tenant-ID header OR the ?tenant= query
+    param so the browser <audio> element can use it without custom headers.
+    """
+    effective_tenant = (x_tenant_id or tenant).strip()
+    if not effective_tenant:
+        raise HTTPException(status_code=401, detail="Tenant identity required")
+
+    async with tenant_session(effective_tenant) as session:
+        pkg = await session.scalar(
+            select(EditorialPackage).where(
+                EditorialPackage.project_id == project_id,
+                EditorialPackage.tenant_id == effective_tenant,
+            )
+        )
+        if pkg is None or not pkg.voiceover_audio_key:
+            raise HTTPException(status_code=404, detail="Voiceover not ready yet")
+
+    from src.adapters.storage.factory import get_storage_adapter
+    storage = get_storage_adapter()
+
+    if not await storage.exists(pkg.voiceover_audio_key):
+        raise HTTPException(status_code=404, detail="Voiceover file not found in storage")
+
+    audio_bytes = await storage.download(pkg.voiceover_audio_key)
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": f"inline; filename=\"voiceover_{project_id}.mp3\"",
+            "Content-Length": str(len(audio_bytes)),
             "Accept-Ranges": "bytes",
         },
     )
