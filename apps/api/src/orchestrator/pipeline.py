@@ -24,6 +24,7 @@ PIPELINE_STEP_NAMES = [
     "generate_voiceover",
     "compose_video",
     "generate_package",
+    "generate_tv_pieces",
     "index_for_search",
 ]
 
@@ -203,6 +204,7 @@ def build_pipeline() -> Pipeline:
     from src.orchestrator.steps.compose_video import ComposeVideoStep
     from src.orchestrator.steps.detect_scenes import DetectScenesStep
     from src.orchestrator.steps.generate_package import GeneratePackageStep
+    from src.orchestrator.steps.generate_tv_pieces import GenerateTVPiecesStep
     from src.orchestrator.steps.generate_voiceover import GenerateVoiceoverStep
     from src.orchestrator.steps.index_for_search import IndexForSearchStep
     from src.orchestrator.steps.ingest import IngestStep
@@ -220,5 +222,6 @@ def build_pipeline() -> Pipeline:
         GenerateVoiceoverStep(),
         ComposeVideoStep(),
         GeneratePackageStep(),
+        GenerateTVPiecesStep(),
         IndexForSearchStep(),
     ])

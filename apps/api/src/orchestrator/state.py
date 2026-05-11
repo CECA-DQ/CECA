@@ -24,6 +24,7 @@ class PipelineState:
     voiceover_audio_key: str = ""
     composed_video_key: str = ""
     editorial_package: dict = field(default_factory=dict)
+    tv_pieces: dict = field(default_factory=dict)
 
     # Per-step raw results stored in DB for traceability
     step_results: dict[str, dict] = field(default_factory=dict)
