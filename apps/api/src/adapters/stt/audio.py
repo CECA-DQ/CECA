@@ -18,14 +18,15 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "www.youtube.com", "m.youtube.com")
+_DIRECT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts", ".mts")
 _MAX_DIRECT_DOWNLOAD_BYTES = 500 * 1024 * 1024  # 500 MB safety limit
 
 
-def _is_youtube_url(url: str) -> bool:
+def _is_direct_video_url(url: str) -> bool:
+    """Return True only if the URL is a direct video file (by extension)."""
     from urllib.parse import urlparse
-    host = urlparse(url).netloc.lower()
-    return any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS)
+    path = urlparse(url).path.lower().split("?")[0]
+    return any(path.endswith(ext) for ext in _DIRECT_VIDEO_EXTENSIONS)
 
 
 def _require_ffmpeg() -> str:
@@ -40,11 +41,12 @@ def _require_ffmpeg() -> str:
 async def extract_audio_from_url(url: str) -> bytes:
     """Download video from URL and return mp3 audio bytes.
 
-    Uses yt-dlp for YouTube. Uses httpx + ffmpeg for direct video URLs.
+    Uses httpx + ffmpeg for direct video file URLs (ending in .mp4, .mov, etc.).
+    Uses yt-dlp for everything else (YouTube, RTVE, and any site yt-dlp supports).
     """
-    if _is_youtube_url(url):
-        return await _extract_audio_youtube(url)
-    return await _extract_audio_direct_url(url)
+    if _is_direct_video_url(url):
+        return await _extract_audio_direct_url(url)
+    return await _extract_audio_ytdlp(url)
 
 
 async def extract_audio_from_file(file_path: str) -> bytes:
@@ -69,8 +71,8 @@ async def extract_audio_from_file(file_path: str) -> bytes:
         Path(out_path).unlink(missing_ok=True)
 
 
-async def _extract_audio_youtube(url: str) -> bytes:
-    """Use yt-dlp to download best audio from a YouTube URL."""
+async def _extract_audio_ytdlp(url: str) -> bytes:
+    """Use yt-dlp to download best audio from any supported URL (YouTube, RTVE, etc.)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         out_template = str(Path(tmpdir) / "audio.%(ext)s")
 
@@ -148,16 +150,16 @@ async def _extract_audio_direct_url(url: str) -> bytes:
 async def get_video_metadata_from_url(url: str) -> dict:
     """Return technical metadata dict for a video URL.
 
-    Uses yt-dlp for YouTube (no download required).
-    Uses ffprobe for direct video URLs.
+    Uses ffprobe for direct video file URLs.
+    Uses yt-dlp for everything else (YouTube, RTVE, and any site yt-dlp supports).
     """
-    if _is_youtube_url(url):
-        return await _metadata_youtube(url)
-    return await _metadata_ffprobe(url)
+    if _is_direct_video_url(url):
+        return await _metadata_ffprobe(url)
+    return await _metadata_ytdlp(url)
 
 
-async def _metadata_youtube(url: str) -> dict:
-    """Extract metadata from YouTube without downloading video."""
+async def _metadata_ytdlp(url: str) -> dict:
+    """Extract metadata via yt-dlp without downloading (YouTube, RTVE, etc.)."""
     def _run() -> dict:
         from src.config import settings
         import yt_dlp  # type: ignore[import]
