@@ -42,8 +42,15 @@ class Pipeline:
     def __init__(self, steps: list[PipelineStep]) -> None:
         self._steps = {step.name: step for step in steps}
 
-    async def run(self, project_id: UUID, tenant_id: str) -> PipelineState:
-        pipeline_run_id = await self._create_run(project_id, tenant_id)
+    async def run(
+        self, project_id: UUID, tenant_id: str, pipeline_run_id: UUID | None = None
+    ) -> PipelineState:
+        if pipeline_run_id is None:
+            pipeline_run_id = await self._create_run(project_id, tenant_id)
+        else:
+            # Run was pre-created by the HTTP endpoint; just mark it as running.
+            await self._finish_run(pipeline_run_id, tenant_id, RunStatus.running)
+
         state = PipelineState(
             project_id=project_id,
             tenant_id=tenant_id,
@@ -142,7 +149,10 @@ class Pipeline:
             run = await session.get(PipelineRun, pipeline_run_id)
             if run:
                 run.status = status
-                run.finished_at = datetime.now(UTC)
+                if status == RunStatus.running:
+                    run.started_at = datetime.now(UTC)
+                else:
+                    run.finished_at = datetime.now(UTC)
                 await session.commit()
 
     async def _save_editorial_package(

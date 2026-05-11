@@ -36,7 +36,22 @@ class ProjectOut(BaseModel):
 
 
 class VideoRegister(BaseModel):
-    original_filename: str
+    original_filename: str | None = None
+    source_url: str | None = None
+
+    @property
+    def is_url(self) -> bool:
+        return bool(self.source_url and self.source_url.startswith(("http://", "https://")))
+
+    def resolved_filename(self) -> str:
+        if self.is_url:
+            return self.source_url.split("?")[0].rstrip("/").split("/")[-1] or "video"
+        return self.original_filename or "video"
+
+    def resolved_storage_key(self, project_id) -> str:
+        if self.is_url:
+            return self.source_url
+        return f"videos/{project_id}/{self.original_filename}"
 
 
 class VideoOut(BaseModel):
@@ -140,14 +155,17 @@ async def register_video(
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(_get_session),
 ) -> Video:
+    if not body.original_filename and not body.source_url:
+        raise HTTPException(status_code=422, detail="Provide either original_filename or source_url")
+
     project = await _get_or_404(session, project_id, tenant_id)
 
-    storage_key = f"videos/{project_id}/{body.original_filename}"
+    storage_key = body.resolved_storage_key(project_id)
     video = Video(
         id=uuid4(),
         project_id=project_id,
         tenant_id=tenant_id,
-        original_filename=body.original_filename,
+        original_filename=body.resolved_filename(),
         storage_key=storage_key,
     )
     session.add(video)
@@ -167,14 +185,38 @@ async def trigger_pipeline(
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(_get_session),
 ) -> dict:
+    from uuid import uuid4 as _uuid4
+    from src.models.pipeline_run import PipelineRun, PipelineStepRun, RunStatus
+    from src.orchestrator.pipeline import PIPELINE_STEP_NAMES
+
     project = await _get_or_404(session, project_id, tenant_id)
     if not project.video_key:
         raise HTTPException(status_code=422, detail="Register a video before running the pipeline")
 
-    from src.workers.pipeline_tasks import process_project
-    task = process_project.delay(str(project_id), tenant_id)
+    # Create PipelineRun and all step records synchronously so the status
+    # endpoint returns immediately — before the Celery worker even starts.
+    pipeline_run_id = _uuid4()
+    session.add(PipelineRun(
+        id=pipeline_run_id,
+        project_id=project_id,
+        tenant_id=tenant_id,
+        status=RunStatus.pending,
+    ))
+    for position, step_name in enumerate(PIPELINE_STEP_NAMES):
+        session.add(PipelineStepRun(
+            id=_uuid4(),
+            pipeline_run_id=pipeline_run_id,
+            tenant_id=tenant_id,
+            step_name=step_name,
+            position=position,
+            status=RunStatus.pending,
+        ))
+    await session.commit()
 
-    return {"task_id": task.id, "project_id": str(project_id), "status": "queued"}
+    from src.workers.pipeline_tasks import process_project
+    task = process_project.delay(str(project_id), tenant_id, str(pipeline_run_id))
+
+    return {"task_id": task.id, "project_id": str(project_id), "pipeline_run_id": str(pipeline_run_id), "status": "queued"}
 
 
 @router.get("/{project_id}/pipeline/status", response_model=PipelineStatusOut)
