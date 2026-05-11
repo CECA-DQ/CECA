@@ -65,7 +65,8 @@ class AnalyzeVisualStep(PipelineStep):
             state.step_results[self.name] = result
             return state
 
-        # Enrich scenes with their transcript text for the prompt
+        # Scenes from detect_scenes already carry combined text.
+        # Fall back to matching by index if text is missing (legacy).
         seg_by_index = {i: s for i, s in enumerate(transcript_segments)}
         scenes_with_text = [
             {
@@ -73,10 +74,18 @@ class AnalyzeVisualStep(PipelineStep):
                 "start": s["start"],
                 "end": s["end"],
                 "shot_type": s["type"],
-                "text": seg_by_index.get(s["index"], {}).get("text", ""),
+                "text": s.get("text") or seg_by_index.get(s["index"], {}).get("text", ""),
             }
             for s in scenes
         ]
+
+        # Hard safety cap — LLM responses truncate above ~20 items
+        if len(scenes_with_text) > 20:
+            logger.warning(
+                "Too many scenes (%d) for visual analysis — capping at 20",
+                len(scenes_with_text),
+            )
+            scenes_with_text = scenes_with_text[:20]
 
         try:
             analysis = await self._call_llm(scenes_with_text)

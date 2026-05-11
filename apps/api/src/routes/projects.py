@@ -291,7 +291,6 @@ async def get_video(
     project_id: UUID,
     x_tenant_id: str = Header(default=""),
     tenant: str = Query(default=""),
-    session: AsyncSession = Depends(_get_session),
 ) -> StreamingResponse:
     """Stream the composed MP4 for a project.
 
@@ -301,16 +300,25 @@ async def get_video(
     effective_tenant = (x_tenant_id or tenant).strip()
     if not effective_tenant:
         raise HTTPException(status_code=401, detail="Tenant identity required")
-    await _get_or_404(session, project_id, effective_tenant)
 
-    pkg = await session.scalar(
-        select(EditorialPackage).where(
-            EditorialPackage.project_id == project_id,
-            EditorialPackage.tenant_id == effective_tenant,
+    async with tenant_session(effective_tenant) as session:
+        project = await session.scalar(
+            select(Project).where(
+                Project.id == project_id,
+                Project.tenant_id == effective_tenant,
+            )
         )
-    )
-    if pkg is None or not pkg.composed_video_key:
-        raise HTTPException(status_code=404, detail="Video not ready yet")
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        pkg = await session.scalar(
+            select(EditorialPackage).where(
+                EditorialPackage.project_id == project_id,
+                EditorialPackage.tenant_id == effective_tenant,
+            )
+        )
+        if pkg is None or not pkg.composed_video_key:
+            raise HTTPException(status_code=404, detail="Video not ready yet")
 
     from src.adapters.storage.factory import get_storage_adapter
     storage = get_storage_adapter()
