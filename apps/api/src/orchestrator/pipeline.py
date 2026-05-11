@@ -195,6 +195,7 @@ class Pipeline:
             target.voiceover_script = state.voiceover_script
             target.voiceover_audio_key = state.voiceover_audio_key
             target.composed_video_key = state.composed_video_key
+            target.tv_pieces = state.tv_pieces or None
             await session.commit()
 
 

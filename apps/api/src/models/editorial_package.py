@@ -31,6 +31,7 @@ class EditorialPackage(Base, TenantOwnedMixin):
     voiceover_script: Mapped[str | None] = mapped_column(Text)      # voz en off completa
     voiceover_audio_key: Mapped[str | None] = mapped_column(Text)   # storage key
     composed_video_key: Mapped[str | None] = mapped_column(Text)    # storage key of final MP4
+    tv_pieces: Mapped[dict | None] = mapped_column(JSONB)           # TV broadcast production pieces
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

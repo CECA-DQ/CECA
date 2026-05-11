@@ -95,6 +95,7 @@ class EditorialPackageOut(BaseModel):
     voiceover_audio_key: str | None
     composed_video_key: str | None
     created_at: datetime
+    tv_pieces: dict | None = None
     # Computed fields — not stored in DB, added by the route handler
     article: str | None = None
     angles: list | None = None
