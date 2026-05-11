@@ -25,6 +25,12 @@ def process_project(self, project_id: str, tenant_id: str) -> dict:
 
 
 async def _run(project_id: UUID, tenant_id: str) -> dict:
+    # Dispose the module-level connection pool so asyncpg creates fresh
+    # connections in this event loop. Required because Celery workers run
+    # asyncio.run() in a new loop while the engine was created in a different one.
+    from src.db.session import engine
+    await engine.dispose()
+
     from src.orchestrator.pipeline import build_pipeline
 
     pipeline = build_pipeline()

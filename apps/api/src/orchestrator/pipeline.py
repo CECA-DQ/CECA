@@ -152,18 +152,23 @@ class Pipeline:
         if not pkg:
             return
         async with tenant_session(tenant_id) as session:
-            session.add(EditorialPackage(
-                id=uuid4(),
-                project_id=project_id,
-                tenant_id=tenant_id,
-                web_article=pkg.get("web_article"),
-                tweet=pkg.get("tweet"),
-                executive_summary=pkg.get("executive_summary"),
-                angle_proposals=pkg.get("angle_proposals"),
-                voiceover_script=state.voiceover_script,
-                voiceover_audio_key=state.voiceover_audio_key,
-                composed_video_key=state.composed_video_key,
-            ))
+            # Upsert: update if a package already exists for this project run.
+            existing = await session.scalar(
+                select(EditorialPackage).where(EditorialPackage.project_id == project_id)
+            )
+            if existing:
+                target = existing
+            else:
+                target = EditorialPackage(id=uuid4(), project_id=project_id, tenant_id=tenant_id)
+                session.add(target)
+
+            target.web_article = pkg.get("web_article")
+            target.tweet = pkg.get("tweet")
+            target.executive_summary = pkg.get("executive_summary")
+            target.angle_proposals = pkg.get("angle_proposals")
+            target.voiceover_script = state.voiceover_script
+            target.voiceover_audio_key = state.voiceover_audio_key
+            target.composed_video_key = state.composed_video_key
             await session.commit()
 
 

@@ -1,10 +1,13 @@
 import asyncio
+import json
 import logging
 
 from src.orchestrator.state import PipelineState
 from src.orchestrator.steps.base import PipelineStep
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_KEYS = {"web_article", "tweet", "executive_summary", "angle_proposals"}
 
 _MOCK_PACKAGE = {
     "web_article": (
@@ -43,14 +46,62 @@ _MOCK_PACKAGE = {
 }
 
 
+class _GuardrailError(Exception):
+    """Raised when the LLM output does not meet the guardrail constraints."""
+
+
+def _parse_and_validate(text: str) -> dict:
+    """Parse JSON response and validate required keys. Raises _GuardrailError on failure."""
+    cleaned = text.strip()
+
+    # Strip markdown code fences if present
+    if cleaned.startswith("```"):
+        parts = cleaned.split("```")
+        cleaned = parts[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise _GuardrailError(f"Response is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise _GuardrailError("Response is not a JSON object")
+
+    missing = _REQUIRED_KEYS - data.keys()
+    if missing:
+        raise _GuardrailError(f"Missing required keys: {sorted(missing)}")
+
+    if not isinstance(data.get("angle_proposals"), list):
+        raise _GuardrailError("'angle_proposals' must be a list")
+
+    if len(data.get("tweet", "")) > 280:
+        raise _GuardrailError(
+            f"Tweet exceeds 280 characters ({len(data['tweet'])} chars)"
+        )
+
+    return data
+
+
 class GeneratePackageStep(PipelineStep):
-    """Generate the full editorial package: article, tweet, summary, angle proposals."""
+    """Generate the full editorial package: article, tweet, summary, angle proposals.
+
+    Guardrails:
+    - Output must be valid JSON with all 4 required keys.
+    - tweet must not exceed 280 characters.
+    - angle_proposals must be a list.
+    - On validation failure: one retry with a correction instruction.
+    - If LLM is unavailable or fails twice: falls back to mock package.
+    """
 
     name = "generate_package"
     description = "Generate web article, tweet, executive summary and angle proposals"
 
     async def execute(self, state: PipelineState) -> PipelineState:
         package = await self._generate(state)
+        package["source"] = "llm" if package is not _MOCK_PACKAGE else "mock"
         state.editorial_package = package
         state.step_results[self.name] = package
         return state
@@ -58,48 +109,51 @@ class GeneratePackageStep(PipelineStep):
     async def _generate(self, state: PipelineState) -> dict:
         try:
             from src.adapters.llm.factory import get_llm_provider
-            from src.config import settings
-
-            if not settings.groq_api_key and not settings.anthropic_api_key:
-                raise ValueError("No LLM API key configured")
+            from src.services.prompt_store import get_prompt_store
 
             llm = get_llm_provider()
-            transcript_text = state.transcript.get("full_text", "")
-            script = state.voiceover_script
+            prompt = get_prompt_store().render(
+                "pipeline/generate_package",
+                transcript=state.transcript.get("full_text", ""),
+                script=state.voiceover_script,
+            )
+            messages = [{"role": "user", "content": prompt.user}]
 
+            # Attempt 1
             response = await llm.generate(
-                system=(
-                    "Eres un redactor jefe de un informativo de televisión español. "
-                    "Generas paquetes editoriales completos a partir de transcripciones. "
-                    "Responde SIEMPRE en JSON válido con las claves: "
-                    "web_article, tweet, executive_summary, angle_proposals (lista de strings)."
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Genera el paquete editorial completo para esta pieza informativa.\n\n"
-                        f"Voz en off:\n{script}\n\n"
-                        f"Transcripción:\n{transcript_text}\n\n"
-                        "- web_article: nota web de 300 palabras en markdown\n"
-                        "- tweet: máximo 280 caracteres con hashtags\n"
-                        "- executive_summary: 2-3 frases para el editor\n"
-                        "- angle_proposals: lista de 5 propuestas de ángulos alternativos"
-                    ),
-                }],
+                system=prompt.system,
+                messages=messages,
                 temperature=0.5,
                 max_tokens=1200,
             )
+            try:
+                return _parse_and_validate(response.text)
+            except _GuardrailError as guard_err:
+                logger.warning(
+                    "generate_package guardrail failed (attempt 1): %s — retrying", guard_err
+                )
 
-            import json
-            # Strip markdown code fences if present
-            text = response.text.strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            return json.loads(text.strip())
+            # Attempt 2 — show the bad output and ask for a correction
+            messages = messages + [
+                {"role": "assistant", "content": response.text},
+                {
+                    "role": "user",
+                    "content": (
+                        f"El JSON anterior no es válido: {guard_err}. "
+                        "Devuelve únicamente el objeto JSON corregido, sin texto adicional, "
+                        f"con estas claves obligatorias: {sorted(_REQUIRED_KEYS)}."
+                    ),
+                },
+            ]
+            response = await llm.generate(
+                system=prompt.system,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            return _parse_and_validate(response.text)
 
         except Exception as exc:
-            logger.warning("LLM call failed in generate_package, using mock: %s", exc)
-            await asyncio.sleep(1.0)
+            logger.warning("generate_package LLM failed, using mock: %s", exc)
+            await asyncio.sleep(0.5)
             return _MOCK_PACKAGE
