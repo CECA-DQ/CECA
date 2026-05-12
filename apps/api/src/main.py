@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.logging import setup_logging
+from src.routes.assignments import router as assignments_router
+from src.routes.kpis import router as kpis_router
 from src.routes.projects import router as projects_router
 
 setup_logging()
@@ -16,6 +18,8 @@ app.add_middleware(
 )
 
 app.include_router(projects_router)
+app.include_router(assignments_router)
+app.include_router(kpis_router)
 
 
 @app.get("/healthz", tags=["ops"])
