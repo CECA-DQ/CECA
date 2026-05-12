@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.logging import setup_logging
 from src.routes.assignments import router as assignments_router
+from src.routes.cesta import router as cesta_router
 from src.routes.kpis import router as kpis_router
 from src.routes.projects import router as projects_router
 
@@ -20,6 +21,7 @@ app.add_middleware(
 app.include_router(projects_router)
 app.include_router(assignments_router)
 app.include_router(kpis_router)
+app.include_router(cesta_router)
 
 
 @app.get("/healthz", tags=["ops"])
