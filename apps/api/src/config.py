@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     stt_provider: str = "groq_whisper"    # groq_whisper | whisper_api | mock
     tts_provider: str = "elevenlabs"      # elevenlabs | openai_tts
     tts_default_voice_id: str = "pNInz6obpgDQGcFmaJgB"  # ElevenLabs Adam (multilingual)
-    vector_provider: str = "mock"         # mock | pgvector
+    vector_provider: str = "mock"         # mock | pgvector | pgfts
+    embedding_model: str = "local/intfloat/multilingual-e5-small"  # local/<model> | text-embedding-3-small | voyage-3
+    embedding_dimensions: int = 384       # must match vector column in migration
 
     # Cloudflare R2
     r2_account_id: str = ""

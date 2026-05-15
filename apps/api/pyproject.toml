@@ -17,6 +17,7 @@ dependencies = [
     "openai",
     "elevenlabs",
     "pgvector",
+    "voyageai",
     "aioboto3",
     "jinja2",
     "python-multipart",

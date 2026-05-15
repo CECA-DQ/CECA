@@ -58,5 +58,22 @@ class IngestStep(PipelineStep):
                     "Video probe failed (%s: %s), using mock metadata",
                     type(exc).__name__, exc,
                 )
+        else:
+            try:
+                from pathlib import Path
+                from src.adapters.stt.audio import get_video_metadata_from_local_file
+                local_path = str((Path("data/storage") / video_key).resolve())
+                meta = await get_video_metadata_from_local_file(local_path)
+                logger.info(
+                    "Probed local file metadata: duration=%.1fs resolution=%s",
+                    meta.get("duration_seconds", 0),
+                    meta.get("resolution", "unknown"),
+                )
+                return meta
+            except Exception as exc:
+                logger.warning(
+                    "Local file probe failed (%s: %s), using mock metadata",
+                    type(exc).__name__, exc,
+                )
 
         return dict(_MOCK_METADATA)

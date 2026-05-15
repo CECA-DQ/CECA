@@ -40,10 +40,6 @@ class ComposeVideoStep(PipelineStep):
             logger.warning("No video URL or segments — using mock video key")
             return self._mock(state)
 
-        if not video_url.startswith(("http://", "https://")):
-            logger.warning("Local file composition not implemented — using mock video key")
-            return self._mock(state)
-
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             logger.warning("ffmpeg not found — using mock video key")
@@ -111,7 +107,18 @@ async def _compose(
 
 
 async def _download_video(url: str, tmpdir: Path) -> Path:
-    """Download video at 720p using yt-dlp."""
+    """Return a path to the video file, downloading it if necessary.
+
+    For local storage keys: resolves the path directly (no download).
+    For remote URLs: downloads via yt-dlp.
+    """
+    if not url.startswith(("http://", "https://")):
+        local_path = (Path("data/storage") / url).resolve()
+        if not local_path.exists():
+            raise RuntimeError(f"Local video file not found: {local_path}")
+        logger.info("Using local video file: %s", local_path)
+        return local_path
+
     from src.config import settings
     out_template = str(tmpdir / "source.%(ext)s")
 
@@ -133,10 +140,10 @@ async def _download_video(url: str, tmpdir: Path) -> Path:
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _run)
 
-    mp4_files = list(tmpdir.glob("source.*"))
-    if not mp4_files:
+    video_files = list(tmpdir.glob("source.*"))
+    if not video_files:
         raise RuntimeError("yt-dlp did not download a video file")
-    return mp4_files[0]
+    return video_files[0]
 
 
 async def _cut_clips(

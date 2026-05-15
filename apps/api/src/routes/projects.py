@@ -39,17 +39,23 @@ class ProjectOut(BaseModel):
 class VideoRegister(BaseModel):
     original_filename: str | None = None
     source_url: str | None = None
+    # Pre-placed local file: storage key relative to data/storage/ (e.g. "videos/tenis_roma_2026.webm")
+    local_storage_key: str | None = None
 
     @property
     def is_url(self) -> bool:
         return bool(self.source_url and self.source_url.startswith(("http://", "https://")))
 
     def resolved_filename(self) -> str:
+        if self.local_storage_key:
+            return self.local_storage_key.split("/")[-1]
         if self.is_url:
             return self.source_url.split("?")[0].rstrip("/").split("/")[-1] or "video"
         return self.original_filename or "video"
 
     def resolved_storage_key(self, project_id) -> str:
+        if self.local_storage_key:
+            return self.local_storage_key
         if self.is_url:
             return self.source_url
         return f"videos/{project_id}/{self.original_filename}"

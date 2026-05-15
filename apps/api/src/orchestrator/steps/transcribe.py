@@ -88,9 +88,10 @@ class TranscribeStep(PipelineStep):
             logger.info("Extracting audio from URL: %s", video_key)
             return await extract_audio_from_url(video_key)
 
-        # Local storage key — assume it's a path on disk
-        logger.info("Extracting audio from local file: %s", video_key)
-        return await extract_audio_from_file(video_key)
+        from pathlib import Path
+        local_path = str((Path("data/storage") / video_key).resolve())
+        logger.info("Extracting audio from local file: %s", local_path)
+        return await extract_audio_from_file(local_path)
 
     async def _transcribe(self, audio_bytes: bytes):
         """Transcribe audio bytes using the configured STT provider."""

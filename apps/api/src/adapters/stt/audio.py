@@ -147,6 +147,11 @@ async def _extract_audio_direct_url(url: str) -> bytes:
         return tmp_audio.read_bytes()
 
 
+async def get_video_metadata_from_local_file(file_path: str) -> dict:
+    """Return technical metadata for a local video file using ffprobe."""
+    return await _metadata_ffprobe(file_path)
+
+
 async def get_video_metadata_from_url(url: str) -> dict:
     """Return technical metadata dict for a video URL.
 
