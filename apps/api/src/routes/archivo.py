@@ -489,3 +489,51 @@ async def extraer_clip(
         media_type="video/mp4",
         headers={"Content-Disposition": f"inline; filename=\"clip_{segment_id}.mp4\""},
     )
+
+
+_VIDEO_EXTS = {".mp4", ".webm", ".mov", ".avi", ".mkv", ".mts", ".m4v"}
+
+
+@router.get("/videos")
+async def listar_videos(
+    tenant_id: str = Depends(get_tenant_id),
+    session: AsyncSession = Depends(_get_session),
+) -> dict:
+    """List all video files available in storage, with thumbnails from indexed segments."""
+    videos_dir = _STORAGE_BASE / "videos"
+    if not videos_dir.exists():
+        return {"videos": []}
+
+    files = [f for f in videos_dir.iterdir() if f.suffix.lower() in _VIDEO_EXTS]
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+    # One DB query to find the first indexed thumbnail per source file
+    thumb_rows = await session.execute(
+        select(SegmentoArchivo.archivo_origen, SegmentoArchivo.thumbnail_key)
+        .where(
+            SegmentoArchivo.tenant_id == tenant_id,
+            SegmentoArchivo.thumbnail_key.isnot(None),
+        )
+        .order_by(SegmentoArchivo.created_at)
+    )
+    # Map filename → first thumbnail_key found
+    thumb_map: dict[str, str] = {}
+    for origen, thumb_key in thumb_rows:
+        fname = Path(origen).name
+        if fname not in thumb_map:
+            thumb_map[fname] = thumb_key
+
+    return {
+        "videos": [
+            {
+                "storage_key": f"videos/{f.name}",
+                "nombre": f.name,
+                "size_mb": round(f.stat().st_size / 1_048_576, 1),
+                "thumbnail_url": (
+                    f"/api/archivo/thumbnail/{thumb_map[f.name]}"
+                    if f.name in thumb_map else None
+                ),
+            }
+            for f in files
+        ]
+    }

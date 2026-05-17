@@ -70,8 +70,7 @@ def _resolve(key: str) -> Path:
 
 
 async def _transcribe_full(source: Path, ffmpeg: str) -> list[dict]:
-    """Transcribe full video returning segments with timestamps."""
-    import whisper as _whisper
+    from src.adapters.stt.factory import get_stt_provider
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         mp3_path = tmp.name
@@ -86,10 +85,18 @@ async def _transcribe_full(source: Path, ffmpeg: str) -> list[dict]:
         )
         await proc.communicate()
 
-        loop = asyncio.get_running_loop()
-        model = await loop.run_in_executor(None, _whisper.load_model, "base")
-        result = await loop.run_in_executor(None, model.transcribe, mp3_path)
-        return result.get("segments", [])
+        audio_bytes = Path(mp3_path).read_bytes()
+        stt = get_stt_provider()
+        result = await stt.transcribe(
+            audio=audio_bytes,
+            language=None,
+            with_timestamps=True,
+            with_diarization=False,
+        )
+        return [{"start": s.start, "end": s.end, "text": s.text} for s in result.segments]
+    except Exception as exc:
+        logger.warning("Transcription failed for %s: %s", source.name, exc)
+        return []
     finally:
         Path(mp3_path).unlink(missing_ok=True)
 
