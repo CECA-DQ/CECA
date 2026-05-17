@@ -1,0 +1,20 @@
+# Railway config for the Celery worker service (ceca-worker)
+#
+# In the Railway dashboard, for this service set:
+#   Config File Path → infra/deploy/railway.worker.toml
+#
+# This service uses the same Docker image as the API.
+# The only difference is the start command.
+#
+# Required environment variables: same as the API service.
+# Tip: in Railway you can share variables between services using
+# a Shared Variable set at the project level.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "infra/docker/Dockerfile"
+
+[deploy]
+startCommand = "celery -A src.workers.celery_app worker --loglevel=info --concurrency=2"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

@@ -1,0 +1,25 @@
+# Video files and raw media — can be several GB
+data/
+
+# Local environment files with secrets
+**/.env
+**/.env.local
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.venv/
+
+# Tests and dev tooling — not needed in the image
+apps/api/tests/
+**/.pytest_cache/
+**/.ruff_cache/
+
+# Git
+.git/
+.gitignore
+
+# Docs
+docs/
+*.md

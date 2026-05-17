@@ -1,0 +1,30 @@
+# Railway config for the API service (ceca-api)
+#
+# In the Railway dashboard, for this service set:
+#   Config File Path → infra/deploy/railway.api.toml
+#
+# Required environment variables (set in Railway dashboard):
+#   DATABASE_URL      → auto-injected when you link the PostgreSQL service
+#   REDIS_URL         → auto-injected when you link the Redis service
+#   ANTHROPIC_API_KEY
+#   GROQ_API_KEY
+#   ELEVENLABS_API_KEY
+#   VOYAGE_API_KEY
+#   LLM_PROVIDER      → groq (or claude)
+#   STT_PROVIDER      → whisper_api
+#   TTS_PROVIDER      → elevenlabs
+#   STORAGE_PROVIDER  → r2  (use local only for dev)
+#   MAM_PROVIDER      → mock
+#   VECTOR_PROVIDER   → pgvector
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "infra/docker/Dockerfile"
+
+[deploy]
+startCommand = "uvicorn src.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
