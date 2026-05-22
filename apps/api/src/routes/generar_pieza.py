@@ -27,15 +27,15 @@ router = APIRouter(prefix="/api/montaje", tags=["montaje"])
 _STORAGE_BASE = Path("data/storage")
 
 _PIECE_CONFIGS: dict[str, dict] = {
-    "cola":       {"duracion_default": 45,  "criterio": "planos de recurso y b-roll sin declaraciones, para narrar encima", "con_locucion": False},
-    "total":      {"duracion_default": 20,  "criterio": "solo la declaración más impactante del protagonista", "con_locucion": False},
-    "vtr":        {"duracion_default": 120, "criterio": "mezcla de declaraciones clave, b-roll de apoyo y voz en off conectora", "con_locucion": True},
-    "nota":       {"duracion_default": 75,  "criterio": "pieza informativa completa, declaración principal más contexto visual", "con_locucion": True},
-    "off":        {"duracion_default": 60,  "criterio": "solo imágenes de recurso sin declaraciones, para narrar en off", "con_locucion": True},
-    "broll":      {"duracion_default": 30,  "criterio": "imágenes de recurso variadas sin audio relevante", "con_locucion": False},
-    "highlights": {"duracion_default": 180, "criterio": "momentos más destacados e impactantes en orden cronológico", "con_locucion": False},
-    "promo":      {"duracion_default": 30,  "criterio": "momentos más llamativos para enganchar antes del reportaje", "con_locucion": False},
-    "teaser":     {"duracion_default": 15,  "criterio": "el instante más impactante para crear expectativa máxima", "con_locucion": False},
+    "cola":       {"duracion_default": 45,  "criterio": "cortes cortos de 3-8 segundos de planos de recurso y b-roll sin declaraciones, distribuidos por todo el vídeo, para narrar encima", "con_locucion": False},
+    "total":      {"duracion_default": 20,  "criterio": "solo la declaración más impactante del protagonista, en un único corte", "con_locucion": False},
+    "vtr":        {"duracion_default": 120, "criterio": "mezcla de declaraciones clave (8-15 s cada una), b-roll de apoyo (3-6 s) y momentos de voz en off conectora, distribuidos por todo el vídeo", "con_locucion": True},
+    "nota":       {"duracion_default": 75,  "criterio": "pieza informativa completa: declaración principal más contexto visual, cortes de 5-12 segundos distribuidos por el vídeo", "con_locucion": True},
+    "off":        {"duracion_default": 60,  "criterio": "cortes cortos de 3-8 segundos de imágenes de recurso sin declaraciones, distribuidos por todo el vídeo, para narrar en off", "con_locucion": True},
+    "broll":      {"duracion_default": 30,  "criterio": "cortes muy cortos de 3-6 segundos de imágenes de recurso variadas sin audio relevante, seleccionados de distintas partes del vídeo", "con_locucion": False},
+    "highlights": {"duracion_default": 180, "criterio": "cortes cortos de 5-12 segundos de los momentos más destacados e impactantes, distribuidos cronológicamente por todo el vídeo", "con_locucion": False},
+    "promo":      {"duracion_default": 30,  "criterio": "cortes muy cortos de 3-5 segundos de los momentos más llamativos para enganchar, tomados de distintas partes del vídeo", "con_locucion": False},
+    "teaser":     {"duracion_default": 15,  "criterio": "uno o dos cortes de 5-8 segundos del instante más impactante para crear expectativa máxima", "con_locucion": False},
 }
 
 _PROMPT_GENERAR = """Eres un editor de televisión experto.
@@ -46,6 +46,11 @@ PIEZA:
 - Entradilla: {entradilla}
 - Duración objetivo: {duracion_objetivo} segundos
 - Criterio editorial: {criterio}
+
+REGLAS DE MONTAJE OBLIGATORIAS:
+- Usa cortes cortos: entre 3 y 15 segundos cada uno según el tipo de pieza.
+- Distribuye los segmentos a lo largo de TODO el material disponible. No agrupes al principio.
+- Varía los tipos de plano y los momentos elegidos para dar ritmo y diversidad.
 
 TRANSCRIPCIONES (fuente_index identifica el vídeo de origen):
 {transcripciones}
@@ -112,14 +117,43 @@ async def _transcribe_source(source: Path, ffmpeg: str) -> list[dict]:
         Path(mp3_path).unlink(missing_ok=True)
 
 
+def _sample_segments(segments: list[dict], max_chars: int) -> str:
+    """Format segments sampling evenly to preserve the full timeline within the char budget."""
+    lines = [
+        f"[{s['start']:.1f}s-{s['end']:.1f}s] {s['text'].strip()}"
+        for s in segments
+    ]
+    full = "\n".join(lines)
+    if len(full) <= max_chars:
+        return full
+    avg_len = len(full) / max(len(lines), 1)
+    max_lines = max(1, int(max_chars / avg_len))
+    step = max(1, len(lines) // max_lines)
+    return "\n".join(lines[i] for i in range(0, len(lines), step))
+
+
 def _format_transcripts(sources: list[Path], all_segments: list[list[dict]]) -> str:
+    """Combine transcripts from multiple sources, sampling each evenly."""
+    # Budget per source: split 7000 chars across sources
+    per_source_budget = max(500, 7000 // max(len(sources), 1))
     parts: list[str] = []
     for idx, (src, segs) in enumerate(zip(sources, all_segments)):
-        lines = [f"--- FUENTE {idx} ({src.name}) ---"]
-        for s in segs:
-            lines.append(f"[{s['start']:.1f}s-{s['end']:.1f}s] {s['text'].strip()}")
-        parts.append("\n".join(lines))
+        header = f"--- FUENTE {idx} ({src.name}) ---"
+        body = _sample_segments(segs, per_source_budget)
+        parts.append(f"{header}\n{body}")
     return "\n\n".join(parts)
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Extract and parse the first JSON object from an LLM response."""
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError(f"No JSON object found in LLM response: {raw[:200]}")
+    try:
+        return json.loads(raw[start:end])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in LLM response: {exc}") from exc
 
 
 async def _select_segments_llm(
@@ -143,7 +177,7 @@ async def _select_segments_llm(
         entradilla=entradilla[:400],
         duracion_objetivo=duracion_objetivo,
         criterio=criterio,
-        transcripciones=transcripciones[:7000],
+        transcripciones=transcripciones,
         instrucciones_locucion=instrucciones,
     )
     response = await llm.generate(
@@ -152,12 +186,7 @@ async def _select_segments_llm(
         temperature=0.3,
         max_tokens=2000,
     )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    return _parse_llm_json(response.text.strip())
 
 
 async def _synthesize_locucion(text: str, voz_id: str) -> str:
@@ -200,10 +229,15 @@ async def generar_pieza(
 
     transcripciones_fmt = _format_transcripts(sources, list(all_segments))
     quiere_locucion = body.generar_locucion and config["con_locucion"]
-    selection = await _select_segments_llm(
-        body.tipo_pieza, body.titular, body.entradilla,
-        transcripciones_fmt, duracion, config["criterio"], quiere_locucion,
-    )
+
+    try:
+        selection = await _select_segments_llm(
+            body.tipo_pieza, body.titular, body.entradilla,
+            transcripciones_fmt, duracion, config["criterio"], quiere_locucion,
+        )
+    except ValueError as exc:
+        logger.error("LLM segment selection failed: %s", exc)
+        raise HTTPException(status_code=422, detail=f"LLM selection failed: {exc}")
 
     raw_segs = selection.get("segmentos", [])
     if not raw_segs:
@@ -221,6 +255,7 @@ async def generar_pieza(
     for seg in raw_segs:
         idx = int(seg.get("fuente_index", 0))
         if idx >= len(body.fuentes):
+            logger.warning("fuente_index %d out of bounds (%d sources), falling back to 0", idx, len(body.fuentes))
             idx = 0
         segmentos.append(SegmentoMontaje(
             storage_key=body.fuentes[idx],

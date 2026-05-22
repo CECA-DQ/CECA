@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ async def _concat(clip_paths: list[Path], out: Path) -> None:
     proc = await asyncio.create_subprocess_exec(
         _ffmpeg(), "-y",
         "-f", "concat", "-safe", "0", "-i", str(list_file),
-        "-c", "copy",
+        "-c", "copy", "-movflags", "+faststart",
         str(out),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -231,12 +231,8 @@ async def ensamblar_endpoint(body: EnsamblarRequest) -> dict:
 
 
 @router.get("/video/{key:path}")
-async def stream_montaje_video(key: str) -> Response:
+async def stream_montaje_video(key: str) -> FileResponse:
     path = (_STORAGE_BASE / key).resolve()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return Response(
-        content=path.read_bytes(),
-        media_type="video/mp4",
-        headers={"Content-Disposition": f"inline; filename=\"{path.name}\""},
-    )
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)

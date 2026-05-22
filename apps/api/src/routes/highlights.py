@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from src.adapters.llm.factory import get_llm_provider
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/highlights", tags=["highlights"])
 _STORAGE_BASE = Path("data/storage")
 
 _PROMPT_HIGHLIGHTS = """Eres un editor de vídeo deportivo y periodístico experto.
-Se te proporciona la transcripción completa de un vídeo con timestamps.
+Se te proporciona una muestra representativa de la transcripción de un vídeo con timestamps.
 El contenido es: {tipo_contenido}
 
 Selecciona los segmentos más importantes para un resumen de {duracion_objetivo} segundos.
@@ -31,7 +31,12 @@ Criterio de selección: {criterio}
 Para deportes prioriza: goles/puntos, momentos de tensión, celebraciones, jugadas clave.
 Para ruedas de prensa prioriza: declaraciones con datos concretos, momentos de tensión, anuncios.
 
-TRANSCRIPCIÓN CON TIMESTAMPS:
+REGLAS DE MONTAJE OBLIGATORIAS:
+- Cada corte debe durar entre 5 y 15 segundos. No selecciones fragmentos más largos.
+- Distribuye los segmentos a lo largo de TODO el vídeo. No agrupes selecciones al principio.
+- Elige momentos de distintas partes del vídeo para dar variedad y ritmo.
+
+TRANSCRIPCIÓN CON TIMESTAMPS (muestra representativa de todo el vídeo):
 {transcripcion}
 
 Responde ÚNICAMENTE con JSON válido, sin markdown ni explicaciones:
@@ -101,14 +106,32 @@ async def _transcribe_full(source: Path, ffmpeg: str) -> list[dict]:
         Path(mp3_path).unlink(missing_ok=True)
 
 
-def _format_transcript(segments: list[dict]) -> str:
-    lines = []
-    for s in segments:
-        start = s.get("start", 0)
-        end = s.get("end", 0)
-        text = s.get("text", "").strip()
-        lines.append(f"[{start:.1f}s-{end:.1f}s] {text}")
-    return "\n".join(lines)
+def _format_transcript(segments: list[dict], max_chars: int = 8000) -> str:
+    """Format transcript sampling evenly so the LLM sees the full video timeline."""
+    lines = [
+        f"[{s.get('start', 0):.1f}s-{s.get('end', 0):.1f}s] {s.get('text', '').strip()}"
+        for s in segments
+    ]
+    full = "\n".join(lines)
+    if len(full) <= max_chars:
+        return full
+    # Sample every Nth segment to cover the whole timeline within the char budget
+    avg_len = len(full) / max(len(lines), 1)
+    max_lines = max(1, int(max_chars / avg_len))
+    step = max(1, len(lines) // max_lines)
+    return "\n".join(lines[i] for i in range(0, len(lines), step))
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Extract and parse the first JSON object from an LLM response."""
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError(f"No JSON object found in LLM response: {raw[:200]}")
+    try:
+        return json.loads(raw[start:end])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in LLM response: {exc}") from exc
 
 
 async def _select_highlights(
@@ -122,7 +145,7 @@ async def _select_highlights(
         tipo_contenido=tipo_contenido,
         duracion_objetivo=duracion_objetivo,
         criterio=criterio,
-        transcripcion=transcripcion_fmt[:8000],  # cap to avoid token limit
+        transcripcion=transcripcion_fmt,
     )
     response = await llm.generate(
         system="Eres un editor de vídeo experto. Responde solo con JSON válido.",
@@ -130,19 +153,14 @@ async def _select_highlights(
         temperature=0.3,
         max_tokens=2000,
     )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    return _parse_llm_json(response.text.strip())
 
 
 async def _compose_highlights(
     source: Path,
     segmentos: list[dict],
     ffmpeg: str,
-) -> Path:
+) -> tuple[Path, str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         clips = []
@@ -179,6 +197,7 @@ async def _compose_highlights(
             "-f", "concat", "-safe", "0",
             "-i", str(concat_txt),
             "-c", "copy",
+            "-movflags", "+faststart",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -187,12 +206,10 @@ async def _compose_highlights(
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()[-300:]}")
 
-        # Move to permanent storage
         out_key = f"output/highlights/{uuid4()}.mp4"
         out_final = (_STORAGE_BASE / out_key).resolve()
         out_final.parent.mkdir(parents=True, exist_ok=True)
-        import shutil as _sh
-        _sh.copy2(str(output_path), str(out_final))
+        shutil.copy2(str(output_path), str(out_final))
         return out_final, out_key
 
 
@@ -220,15 +237,25 @@ async def generar_highlights(
         raise HTTPException(status_code=422, detail="Could not transcribe video")
 
     transcript_fmt = _format_transcript(segments)
-    selection = await _select_highlights(
-        transcript_fmt, body.tipo_contenido, body.duracion_objetivo, body.criterio
-    )
+
+    try:
+        selection = await _select_highlights(
+            transcript_fmt, body.tipo_contenido, body.duracion_objetivo, body.criterio
+        )
+    except ValueError as exc:
+        logger.error("LLM selection failed: %s", exc)
+        raise HTTPException(status_code=422, detail=f"LLM selection failed: {exc}")
 
     segs_sel = selection.get("segmentos_seleccionados", [])
     if not segs_sel:
         raise HTTPException(status_code=422, detail="LLM returned no segments")
 
-    out_path, out_key = await _compose_highlights(source, segs_sel, ffmpeg)
+    try:
+        out_path, out_key = await _compose_highlights(source, segs_sel, ffmpeg)
+    except RuntimeError as exc:
+        logger.error("Highlights composition failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
     total_dur = sum(s["tiempo_fin"] - s["tiempo_inicio"] for s in segs_sel)
 
     return {
@@ -243,12 +270,8 @@ async def generar_highlights(
 
 
 @router.get("/video/{key:path}")
-async def stream_highlights_video(key: str) -> Response:
+async def stream_highlights_video(key: str) -> FileResponse:
     path = (_STORAGE_BASE / key).resolve()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return Response(
-        content=path.read_bytes(),
-        media_type="video/mp4",
-        headers={"Content-Disposition": f"inline; filename=\"{path.name}\""},
-    )
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)

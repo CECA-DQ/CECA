@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from src.adapters.llm.factory import get_llm_provider
@@ -28,13 +28,18 @@ TITULAR: {titular}
 ENTRADILLA: {entradilla}
 CUERPO: {cuerpo}
 
-A continuación tienes la transcripción del vídeo bruto con timestamps.
+A continuación tienes una muestra representativa de la transcripción del vídeo bruto con timestamps.
 Selecciona los mejores segmentos visuales para montar una cola de {duracion_objetivo} segundos.
 
 Prioriza: planos con acción relevante, declaraciones clave, planos generales para contextualizar.
 Evita: silencios largos, planos técnicos (cámara en negro, pruebas de sonido).
 
-TRANSCRIPCIÓN:
+REGLAS DE MONTAJE OBLIGATORIAS:
+- Cada corte debe durar entre 3 y 10 segundos. No selecciones fragmentos más largos.
+- Distribuye los segmentos a lo largo de TODO el vídeo. No agrupes selecciones al principio.
+- Varía los tipos de plano para dar ritmo visual.
+
+TRANSCRIPCIÓN (muestra representativa de todo el vídeo):
 {transcripcion}
 
 Responde ÚNICAMENTE con JSON válido:
@@ -109,6 +114,33 @@ async def _transcribe_for_cola(source: Path, ffmpeg: str) -> list[dict]:
         Path(mp3_path).unlink(missing_ok=True)
 
 
+def _sample_transcript(segments: list[dict], max_chars: int = 6000) -> str:
+    """Format transcript sampling evenly so the LLM sees the full video timeline."""
+    lines = [
+        f"[{s.get('start', 0):.1f}s-{s.get('end', 0):.1f}s] {s.get('text', '').strip()}"
+        for s in segments
+    ]
+    full = "\n".join(lines)
+    if len(full) <= max_chars:
+        return full
+    avg_len = len(full) / max(len(lines), 1)
+    max_lines = max(1, int(max_chars / avg_len))
+    step = max(1, len(lines) // max_lines)
+    return "\n".join(lines[i] for i in range(0, len(lines), step))
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Extract and parse the first JSON object from an LLM response."""
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError(f"No JSON object found in LLM response: {raw[:200]}")
+    try:
+        return json.loads(raw[start:end])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in LLM response: {exc}") from exc
+
+
 async def _select_planos(
     titular: str,
     entradilla: str,
@@ -116,17 +148,14 @@ async def _select_planos(
     segments: list[dict],
     duracion_objetivo: int,
 ) -> dict:
-    transcript_fmt = "\n".join(
-        f"[{s.get('start',0):.1f}s-{s.get('end',0):.1f}s] {s.get('text','').strip()}"
-        for s in segments
-    )
+    transcript_fmt = _sample_transcript(segments)
     llm = get_llm_provider()
     prompt = _PROMPT_SELECCION_PLANOS.format(
         titular=titular,
         entradilla=entradilla,
         cuerpo=cuerpo[:500],
         duracion_objetivo=duracion_objetivo,
-        transcripcion=transcript_fmt[:6000],
+        transcripcion=transcript_fmt,
     )
     response = await llm.generate(
         system="Eres un editor de televisión. Responde solo con JSON válido.",
@@ -134,12 +163,7 @@ async def _select_planos(
         temperature=0.3,
         max_tokens=1500,
     )
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    return _parse_llm_json(response.text.strip())
 
 
 async def _montar_cola(source: Path, segmentos: list[dict], ffmpeg: str) -> tuple[Path, str]:
@@ -176,7 +200,7 @@ async def _montar_cola(source: Path, segmentos: list[dict], ffmpeg: str) -> tupl
         proc = await asyncio.create_subprocess_exec(
             ffmpeg, "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_txt),
-            "-c", "copy", str(output_path),
+            "-c", "copy", "-movflags", "+faststart", str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -187,8 +211,7 @@ async def _montar_cola(source: Path, segmentos: list[dict], ffmpeg: str) -> tupl
         out_key = f"output/colas/{uuid4()}.mp4"
         out_final = (_STORAGE_BASE / out_key).resolve()
         out_final.parent.mkdir(parents=True, exist_ok=True)
-        import shutil as _sh
-        _sh.copy2(str(output_path), str(out_final))
+        shutil.copy2(str(output_path), str(out_final))
         return out_final, out_key
 
 
@@ -215,16 +238,25 @@ async def cola_desde_bruto(
     if not segments:
         raise HTTPException(status_code=422, detail="Could not transcribe bruto")
 
-    selection = await _select_planos(
-        body.titular, body.entradilla, body.cuerpo,
-        segments, body.duracion_objetivo,
-    )
+    try:
+        selection = await _select_planos(
+            body.titular, body.entradilla, body.cuerpo,
+            segments, body.duracion_objetivo,
+        )
+    except ValueError as exc:
+        logger.error("LLM selection failed: %s", exc)
+        raise HTTPException(status_code=422, detail=f"LLM selection failed: {exc}")
 
     segs = selection.get("segmentos", [])
     if not segs:
         raise HTTPException(status_code=422, detail="LLM returned no segments")
 
-    _, out_key = await _montar_cola(source, segs, ffmpeg)
+    try:
+        _, out_key = await _montar_cola(source, segs, ffmpeg)
+    except RuntimeError as exc:
+        logger.error("Cola composition failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
     total = sum(s["tiempo_fin"] - s["tiempo_inicio"] for s in segs)
 
     return {
@@ -238,12 +270,8 @@ async def cola_desde_bruto(
 
 
 @router.get("/video/{key:path}")
-async def stream_cola_video(key: str) -> Response:
+async def stream_cola_video(key: str) -> FileResponse:
     path = (_STORAGE_BASE / key).resolve()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return Response(
-        content=path.read_bytes(),
-        media_type="video/mp4",
-        headers={"Content-Disposition": f"inline; filename=\"{path.name}\""},
-    )
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)

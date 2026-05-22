@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/grafismo", tags=["grafismo"])
@@ -232,12 +232,8 @@ async def aplicar_grafismos(body: GrafismoRequest) -> dict:
 
 
 @router.get("/video/{key:path}")
-async def stream_grafismo_video(key: str) -> Response:
+async def stream_grafismo_video(key: str) -> FileResponse:
     video_path = (_STORAGE_BASE / key).resolve()
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
-    return Response(
-        content=video_path.read_bytes(),
-        media_type="video/mp4",
-        headers={"Content-Disposition": f"inline; filename=\"{video_path.name}\""},
-    )
+    return FileResponse(str(video_path), media_type="video/mp4", filename=video_path.name)
