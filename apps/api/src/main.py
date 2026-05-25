@@ -1,7 +1,15 @@
 import logging
+import os
 import traceback
 
+# Ensure ffmpeg/ffprobe are on PATH regardless of how the process was launched.
+# On macOS with Homebrew the binaries live here but may not be symlinked globally.
+_FFMPEG_BIN = "/usr/local/opt/ffmpeg/bin"
+if os.path.isdir(_FFMPEG_BIN) and _FFMPEG_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _FFMPEG_BIN + ":" + os.environ.get("PATH", "")
+
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -20,13 +28,19 @@ from src.routes.projects import router as projects_router
 
 setup_logging()
 
+_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 app = FastAPI(title="CECA API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 app.include_router(projects_router)
@@ -42,10 +56,26 @@ app.include_router(montaje_router)
 app.include_router(generar_pieza_router)
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    body = await request.body()
+    logging.getLogger(__name__).warning(
+        "422 on %s %s — body: %s — errors: %s",
+        request.method, request.url.path, body.decode(errors="replace"), exc.errors(),
+    )
+    origin = request.headers.get("origin", "")
+    headers = {"Access-Control-Allow-Origin": origin} if origin in _CORS_ORIGINS else {}
+    return JSONResponse(status_code=422, content={"detail": exc.errors()}, headers=headers)
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logging.getLogger(__name__).error("Unhandled exception: %s\n%s", exc, traceback.format_exc())
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    # Starlette does not guarantee CORS headers on responses generated inside
+    # exception handlers, so we add them manually here.
+    origin = request.headers.get("origin", "")
+    headers = {"Access-Control-Allow-Origin": origin} if origin in _CORS_ORIGINS else {}
+    return JSONResponse(status_code=500, content={"detail": str(exc)}, headers=headers)
 
 
 @app.get("/healthz", tags=["ops"])

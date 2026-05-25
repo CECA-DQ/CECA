@@ -89,6 +89,7 @@ async def _normalizar_clip(source: Path, t_start: float, t_end: float | None, ou
     cmd += [
         "-i", str(source),
         "-vf", vf,
+        "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-movflags", "+faststart",
@@ -122,6 +123,29 @@ async def _concat(clip_paths: list[Path], out: Path) -> None:
         raise RuntimeError(f"Concat failed: {stderr.decode()[-300:]}")
 
 
+async def _loop_to_duration(source: Path, target: float, out: Path) -> None:
+    """Re-encode looping the source until it reaches target duration."""
+    cmd = [
+        _ffmpeg(), "-y",
+        "-stream_loop", "-1",
+        "-i", str(source),
+        "-t", str(target),
+        "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Loop to duration failed: {stderr.decode()[-300:]}")
+
+
 async def _mix_voiceover(video: Path, audio: Path, out: Path) -> None:
     """Mix voiceover at full volume over original audio ducked to 15%."""
     proc = await asyncio.create_subprocess_exec(
@@ -149,8 +173,9 @@ async def ensamblar(
     segmentos: list[SegmentoMontaje],
     audio_voiceover_key: str | None = None,
     output_key: str | None = None,
-) -> tuple[str, float]:
-    """Assemble clips and return (video_key, duration_seconds)."""
+    duracion_objetivo: int | None = None,
+) -> tuple[str, float, bool]:
+    """Assemble clips and return (video_key, duration_seconds, material_en_loop)."""
     if not segmentos:
         raise HTTPException(status_code=422, detail="At least one segment is required")
 
@@ -187,7 +212,18 @@ async def ensamblar(
         else:
             await _concat(clip_paths, out_path)
 
-        # 3. Mix voiceover if provided
+        # 3. Loop material if shorter than target
+        material_en_loop = False
+        duration = await _get_duration(out_path)
+        if duracion_objetivo and duration < duracion_objetivo - 0.5:
+            looped = out_path.with_stem(out_path.stem + "_looped")
+            await _loop_to_duration(out_path, float(duracion_objetivo), looped)
+            out_path.unlink()
+            looped.rename(out_path)
+            material_en_loop = True
+            duration = await _get_duration(out_path)
+
+        # 4. Mix voiceover if provided
         if audio_voiceover_key:
             audio_path = (_STORAGE_BASE / audio_voiceover_key).resolve()
             if audio_path.exists():
@@ -197,7 +233,7 @@ async def ensamblar(
                 mixed.rename(out_path)
 
         duration = await _get_duration(out_path)
-        return out_key, duration
+        return out_key, duration, material_en_loop
 
     finally:
         # Clean up normalised intermediate clips
@@ -213,9 +249,10 @@ async def ensamblar(
 @router.post("/ensamblar")
 async def ensamblar_endpoint(body: EnsamblarRequest) -> dict:
     try:
-        video_key, duration = await ensamblar(
+        video_key, duration, material_en_loop = await ensamblar(
             segmentos=body.segmentos,
             audio_voiceover_key=body.audio_voiceover_key,
+            duracion_objetivo=body.duracion_objetivo,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -224,7 +261,10 @@ async def ensamblar_endpoint(body: EnsamblarRequest) -> dict:
         "ok": True,
         "video_key": video_key,
         "video_url": f"/api/montaje/video/{video_key}",
-        "duracion_total": round(duration, 1),
+        "duracion_real": round(duration, 1),
+        "fps_salida": 25,
+        "resolucion": f"{_W}x{_H}",
+        "material_en_loop": material_en_loop,
         "segmentos_montados": len(body.segmentos),
         "tipo_pieza": body.tipo_pieza,
     }
