@@ -20,7 +20,7 @@ from src.adapters.llm.factory import get_llm_provider
 from src.core.auth import get_tenant_id
 from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
-from src.routes.montaje import SegmentoMontaje, _get_duration, ensamblar
+from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, ensamblar
 from src.services.narrative_timeline import generar_timeline_narrativo
 
 logger = logging.getLogger(__name__)
@@ -455,6 +455,7 @@ async def pieza_emision(
         video_key, duration, material_en_loop = await ensamblar(
             base_segs,
             duracion_objetivo=body.duracion_objetivo,
+            normalize_audio=False,   # normalization runs as the final paso, after grafismos+voiceover
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -517,7 +518,20 @@ async def pieza_emision(
             except RuntimeError as exc:
                 logger.error("Audio mix failed, continuing without: %s", exc)
 
+    # ── PASO 5: EBU R128 loudness normalization (-23 LUFS) ────────────────────
     final_path = (_STORAGE_BASE / video_key).resolve()
+    lufs_normalizado = False
+    normalized_path = final_path.with_stem(final_path.stem + "_r128")
+    try:
+        await _normalize_loudness(final_path, normalized_path)
+        final_path.unlink()
+        normalized_path.rename(final_path)
+        lufs_normalizado = True
+        pasos_completados.append("ebu_r128")
+    except RuntimeError as exc:
+        logger.warning("EBU R128 normalization skipped: %s", exc)
+        normalized_path.unlink(missing_ok=True)
+
     final_duration = await _get_duration(final_path)
 
     return {
@@ -533,6 +547,7 @@ async def pieza_emision(
         "grafismos_aplicados": len(elementos),
         "segmentos_montados": len(base_segs),
         "pasos_completados": pasos_completados,
+        "lufs_salida": -23 if lufs_normalizado else None,
         "warning_grafismo": warning_grafismo,
         "plan_narrativo": {
             "titulo_cintillo": titulo_cintillo,

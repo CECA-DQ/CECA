@@ -5,7 +5,9 @@ concatenating so that dimension or codec mismatches never break the join.
 """
 
 import asyncio
+import json
 import logging
+import re
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -91,7 +93,7 @@ async def _normalizar_clip(source: Path, t_start: float, t_end: float | None, ou
         "-vf", vf,
         "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out),
     ]
@@ -132,7 +134,7 @@ async def _loop_to_duration(source: Path, target: float, out: Path) -> None:
         "-t", str(target),
         "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out),
     ]
@@ -155,7 +157,7 @@ async def _mix_voiceover(video: Path, audio: Path, out: Path) -> None:
         "-filter_complex",
         "[0:a]volume=0.15[orig];[1:a]volume=1.0[vo];[orig][vo]amix=inputs=2:duration=first[out]",
         "-map", "0:v", "-map", "[out]",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         str(out),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -163,6 +165,56 @@ async def _mix_voiceover(video: Path, audio: Path, out: Path) -> None:
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError(f"Voiceover mix failed: {stderr.decode()[-300:]}")
+
+
+async def _normalize_loudness(source: Path, out: Path) -> None:
+    """EBU R128 two-pass loudness normalization: -23 LUFS / LRA 11 / TP -1.5 dBTP."""
+    ffmpeg = _ffmpeg()
+
+    # Pass 1 — measure integrated loudness
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg, "-y", "-i", str(source),
+        "-af", "loudnorm=I=-23:LRA=11:TP=-1.5:print_format=json",
+        "-f", "null", "-",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr1 = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Loudnorm pass 1 failed: {stderr1.decode()[-300:]}")
+
+    # Extract JSON measurement block from stderr
+    match = re.search(r"\{[^{}]*\}", stderr1.decode(), re.DOTALL)
+    if not match:
+        raise RuntimeError("Loudnorm pass 1 returned no measurement JSON")
+    try:
+        m = json.loads(match.group())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse loudnorm JSON: {exc}") from exc
+
+    af = (
+        f"loudnorm=I=-23:LRA=11:TP=-1.5"
+        f":measured_I={m['input_i']}"
+        f":measured_LRA={m['input_lra']}"
+        f":measured_TP={m['input_tp']}"
+        f":measured_thresh={m['input_thresh']}"
+        f":offset={m['target_offset']}"
+        f":linear=true:print_format=none"
+    )
+
+    # Pass 2 — apply normalization (video stream copied, audio re-encoded)
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg, "-y", "-i", str(source),
+        "-af", af,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        str(out),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr2 = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Loudnorm pass 2 failed: {stderr2.decode()[-300:]}")
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +226,7 @@ async def ensamblar(
     audio_voiceover_key: str | None = None,
     output_key: str | None = None,
     duracion_objetivo: int | None = None,
+    normalize_audio: bool = True,
 ) -> tuple[str, float, bool]:
     """Assemble clips and return (video_key, duration_seconds, material_en_loop)."""
     if not segmentos:
@@ -232,6 +285,17 @@ async def ensamblar(
                 out_path.unlink()
                 mixed.rename(out_path)
 
+        # 5. EBU R128 loudness normalization (-23 LUFS / LRA 11 / TP -1.5)
+        if normalize_audio:
+            normalized = out_path.with_stem(out_path.stem + "_norm")
+            try:
+                await _normalize_loudness(out_path, normalized)
+                out_path.unlink()
+                normalized.rename(out_path)
+            except RuntimeError as exc:
+                logger.warning("Loudness normalization skipped (no audio track?): %s", exc)
+                normalized.unlink(missing_ok=True)
+
         duration = await _get_duration(out_path)
         return out_key, duration, material_en_loop
 
@@ -267,6 +331,7 @@ async def ensamblar_endpoint(body: EnsamblarRequest) -> dict:
         "material_en_loop": material_en_loop,
         "segmentos_montados": len(body.segmentos),
         "tipo_pieza": body.tipo_pieza,
+        "lufs_salida": -23,
     }
 
 
