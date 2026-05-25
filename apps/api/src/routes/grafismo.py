@@ -55,7 +55,7 @@ _FONT_REGULAR_CANDIDATES = [
 # ---------------------------------------------------------------------------
 
 class GrafismoElemento(BaseModel):
-    tipo: str                   # "titular" | "rotulo_persona" | "dato" | "pie_pagina"
+    tipo: str                   # "titular" | "rotulo_persona" | "dato" | "pie_pagina" | "frase_clave"
     texto_principal: str
     texto_secundario: str = ""
     tiempo_inicio: float
@@ -215,6 +215,60 @@ def _render_crawl(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     return img
 
 
+def _render_frase_clave(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    """Right-side highlight card: dark box + orange accent bar + large quote text.
+
+    Appears in the upper-right quadrant so it never clashes with the lower-third
+    person nameplate or the bottom cintillo band.
+    """
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    texto = el.texto_principal.strip()
+
+    # Word-wrap: max ~22 chars per line so text stays readable at broadcast size
+    words = texto.split()
+    lines: list[str] = []
+    current: list[str] = []
+    for word in words:
+        test = " ".join(current + [word])
+        if len(test) > 22 and current:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+
+    f_quote = _load_font(32, bold=True)
+
+    line_h = 42
+    padding_v = 20
+    padding_h = 20
+    bar_w = 6
+    box_w = int(w * 0.37)
+    box_h = len(lines) * line_h + padding_v * 2
+    box_x = w - box_w - _RIGHT_MARGIN
+    box_y = int(h * 0.10)  # upper area, clear of both top safe zone and lower thirds
+
+    # Semi-transparent dark background
+    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NEGRO_BOX)
+
+    # Orange vertical accent bar on the left edge
+    draw.rectangle([box_x, box_y, box_x + bar_w, box_y + box_h], fill=_NARANJA)
+
+    # Quote text lines
+    for i, line in enumerate(lines):
+        draw.text(
+            (box_x + bar_w + padding_h, box_y + padding_v + i * line_h),
+            line,
+            font=f_quote,
+            fill=_BLANCO,
+        )
+
+    return img
+
+
 def _render_mosca(w: int, h: int) -> Image.Image:
     """Program logo watermark — always present, top of the graphic stack."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -245,6 +299,8 @@ def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
         return _render_pantallon(el, w, h)
     if el.tipo == "pie_pagina":
         return _render_crawl(el, w, h)
+    if el.tipo == "frase_clave":
+        return _render_frase_clave(el, w, h)
     return Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
 
