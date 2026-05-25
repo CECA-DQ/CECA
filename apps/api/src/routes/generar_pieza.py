@@ -21,6 +21,7 @@ from src.core.auth import get_tenant_id
 from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
 from src.routes.montaje import SegmentoMontaje, _get_duration, ensamblar
+from src.services.narrative_timeline import generar_timeline_narrativo
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +340,36 @@ Responde ÚNICAMENTE con JSON válido con esta estructura exacta:
 }}"""
 
 
+def _plan_to_grafismos(
+    plan_segmentos: list[dict],
+    montaje_segs: list[SegmentoMontaje],
+    video_duration: float,
+) -> list[GrafismoEl]:
+    """Convert per-segment relative graphic timings to absolute timeline positions."""
+    elementos: list[GrafismoEl] = []
+    current_t = 0.0
+
+    for plan_seg, montaje_seg in zip(plan_segmentos, montaje_segs):
+        seg_dur = (montaje_seg.tiempo_fin or montaje_seg.tiempo_inicio + 8) - montaje_seg.tiempo_inicio
+
+        for g in plan_seg.get("grafismos", []):
+            t0 = round(current_t + float(g.get("inicio_relativo", 0)), 1)
+            dur = float(g.get("duracion", 5))
+            if t0 >= video_duration:
+                continue
+            elementos.append(GrafismoEl(
+                tipo=g.get("tipo", "titular"),
+                texto_principal=str(g.get("texto_principal", "")),
+                texto_secundario=str(g.get("texto_secundario", "")),
+                tiempo_inicio=t0,
+                duracion=min(dur, video_duration - t0),
+            ))
+
+        current_t += seg_dur
+
+    return elementos
+
+
 @router.post("/pieza-emision")
 async def pieza_emision(
     body: PiezaEmisionRequest,
@@ -353,9 +384,7 @@ async def pieza_emision(
 
     pasos_completados: list[str] = []
 
-    # ── PASO 1: Generar pieza base ─────────────────────────────────────────────
-    config = _PIECE_CONFIGS["vtr"]
-
+    # ── PASO 1: Transcribir fuentes ────────────────────────────────────────────
     sources: list[Path] = []
     for key in body.fuentes:
         p = (_STORAGE_BASE / key).resolve()
@@ -368,24 +397,49 @@ async def pieza_emision(
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
     transcripciones_fmt = _format_transcripts(sources, list(all_segs_trans))
+    pasos_completados.append("transcripcion")
 
+    # ── PASO 2: Generar timeline narrativo (segmentos + grafismos en una llamada)
+    plan: dict = {}
+    plan_segmentos: list[dict] = []
+    locucion_text: str | None = None
     try:
-        selection = await _select_segments_llm(
-            "vtr", body.titular, body.entradilla,
-            transcripciones_fmt, body.duracion_objetivo, config["criterio"], quiere_locucion=True,
+        plan = await generar_timeline_narrativo(
+            transcripciones=transcripciones_fmt,
+            fuentes=body.fuentes,
+            titular=body.titular,
+            entradilla=body.entradilla,
+            tipo_pieza=body.tipo_pieza,
+            duracion_objetivo=body.duracion_objetivo,
+            cintillo_label=body.cintillo_label,
+            requiere_locucion=body.incluir_locucion,
         )
-    except ValueError as exc:
-        logger.error("LLM segment selection failed: %s", exc)
-        raise HTTPException(status_code=422, detail=f"LLM selection failed: {exc}")
+        plan_segmentos = plan.get("segmentos", [])
+        locucion_text = plan.get("locucion")
+        pasos_completados.append("timeline_narrativo")
+    except Exception as exc:
+        logger.error("Narrative timeline failed, falling back to basic selection: %s", exc)
 
-    raw_segs = selection.get("segmentos", [])
-    if not raw_segs:
+    # Fallback: if timeline failed, use basic segment selection
+    if not plan_segmentos:
+        config = _PIECE_CONFIGS["vtr"]
+        try:
+            selection = await _select_segments_llm(
+                "vtr", body.titular, body.entradilla,
+                transcripciones_fmt, body.duracion_objetivo,
+                config["criterio"], quiere_locucion=body.incluir_locucion,
+            )
+            plan_segmentos = selection.get("segmentos", [])
+            locucion_text = selection.get("locucion")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Segment selection failed: {exc}")
+
+    if not plan_segmentos:
         raise HTTPException(status_code=422, detail="LLM returned no segments")
 
-    locucion_text: str | None = selection.get("locucion")
-
+    # ── PASO 3: Montar vídeo base ──────────────────────────────────────────────
     base_segs: list[SegmentoMontaje] = []
-    for seg in raw_segs:
+    for i, seg in enumerate(plan_segmentos):
         idx = int(seg.get("fuente_index", 0))
         if idx >= len(body.fuentes):
             idx = 0
@@ -394,7 +448,7 @@ async def pieza_emision(
             tiempo_inicio=float(seg.get("tiempo_inicio", 0)),
             tiempo_fin=float(seg.get("tiempo_fin", 10)),
             tipo=seg.get("tipo", "broll"),
-            orden=int(seg.get("orden", len(base_segs))),
+            orden=int(seg.get("orden", i)),
         ))
 
     try:
@@ -407,49 +461,20 @@ async def pieza_emision(
 
     pasos_completados.append("pieza_base")
 
-    # ── PASO 2 + 3: Generar grafismos con IA y aplicarlos al vídeo ────────────
-    dur_int = max(30, int(duration))
-    prompt = _PROMPT_GRAFISMOS.format(
-        cintillo=body.cintillo_label,
-        titular=body.titular,
-        entradilla=body.entradilla[:400],
-        duracion=dur_int,
-        pie_duracion=max(10, dur_int - 10),
-        dato1_t=max(15, dur_int // 5),
-        dato2_t=max(30, dur_int // 2),
-        cierre_t=max(15, dur_int - 22),
-    )
+    # ── PASO 4: Convertir grafismos relativos → absolutos y aplicar ───────────
+    titulo_cintillo = plan.get("titulo_cintillo") or f"{body.cintillo_label} — {body.titular[:50]}"
 
-    llm = get_llm_provider()
-    elementos: list[GrafismoEl] = []
-    try:
-        resp = await llm.generate(
-            system="Eres un productor de televisión informativo español. Responde solo con JSON válido.",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=1000,
-        )
-        grafismo_data = _parse_llm_json(resp.text.strip())
-        for el_data in grafismo_data.get("elementos", []):
-            try:
-                elementos.append(GrafismoEl(
-                    tipo=el_data.get("tipo", "dato"),
-                    texto_principal=str(el_data.get("texto_principal", "")),
-                    texto_secundario=str(el_data.get("texto_secundario", "")),
-                    tiempo_inicio=float(el_data.get("tiempo_inicio", 0)),
-                    duracion=float(el_data.get("duracion", 5)),
-                    posicion=el_data.get("posicion", "inferior"),
-                ))
-            except Exception as el_exc:
-                logger.warning("Skipping invalid grafismo element: %s", el_exc)
-    except Exception as exc:
-        logger.warning("Grafismo AI generation failed, using fallback: %s", exc)
+    if plan_segmentos and plan.get("titulo_cintillo"):
+        # Use content-aware graphics from the narrative plan
+        elementos = _plan_to_grafismos(plan_segmentos, base_segs, duration)
+    else:
+        # Fallback structural graphics
+        dur_int = max(30, int(duration))
         short_title = f"{body.cintillo_label} — {body.titular[:45]}"
-        crawl = body.entradilla[:80] if body.entradilla else body.titular
         elementos = [
-            GrafismoEl(tipo="titular", texto_principal=short_title, tiempo_inicio=2, duracion=13, posicion="inferior"),
-            GrafismoEl(tipo="pie_pagina", texto_principal=crawl, tiempo_inicio=2, duracion=max(10, dur_int - 10), posicion="inferior"),
-            GrafismoEl(tipo="titular", texto_principal=short_title, tiempo_inicio=max(15, dur_int - 22), duracion=18, posicion="inferior"),
+            GrafismoEl(tipo="titular", texto_principal=short_title, tiempo_inicio=2.0, duracion=13.0),
+            GrafismoEl(tipo="titular", texto_principal=short_title,
+                       tiempo_inicio=max(15.0, dur_int - 22.0), duracion=18.0),
         ]
 
     warning_grafismo: str | None = None
@@ -503,9 +528,95 @@ async def pieza_emision(
         "fps_salida": 25,
         "resolucion": "1280x720",
         "material_en_loop": material_en_loop,
-        "titulo_generado": f"{body.cintillo_label} — {body.titular}",
+        "titulo_generado": titulo_cintillo,
         "locucion_texto": locucion_text if body.incluir_locucion else None,
         "grafismos_aplicados": len(elementos),
+        "segmentos_montados": len(base_segs),
         "pasos_completados": pasos_completados,
         "warning_grafismo": warning_grafismo,
+        "plan_narrativo": {
+            "titulo_cintillo": titulo_cintillo,
+            "segmentos": [
+                {
+                    "orden": s.get("orden", i),
+                    "tipo": s.get("tipo"),
+                    "duracion": round(
+                        float(s.get("tiempo_fin", 0)) - float(s.get("tiempo_inicio", 0)), 1
+                    ),
+                    "grafismos": len(s.get("grafismos", [])),
+                }
+                for i, s in enumerate(plan_segmentos)
+            ],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Preview endpoint — returns the narrative plan without rendering
+# ---------------------------------------------------------------------------
+
+class PreviewTimelineRequest(BaseModel):
+    fuentes: list[str] = Field(min_length=1)
+    titular: str
+    entradilla: str = ""
+    duracion_objetivo: int = Field(default=300, ge=30)
+    tipo_pieza: str = "vtr"
+    cintillo_label: str = "ÚLTIMA HORA"
+    incluir_locucion: bool = False
+
+
+@router.post("/preview-timeline")
+async def preview_timeline(
+    body: PreviewTimelineRequest,
+    tenant_id: str = Depends(get_tenant_id),
+) -> dict:
+    """Generate the narrative montage plan without rendering any video.
+    Use this to inspect what the AI would produce before committing to a full render.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=500, detail="ffmpeg not found on PATH")
+
+    sources: list[Path] = []
+    for key in body.fuentes:
+        p = (_STORAGE_BASE / key).resolve()
+        if not p.exists():
+            raise HTTPException(status_code=404, detail=f"Source not found: {key}")
+        sources.append(p)
+
+    all_segs = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    if all(not s for s in all_segs):
+        raise HTTPException(status_code=422, detail="Could not transcribe any source video")
+
+    transcripciones_fmt = _format_transcripts(sources, list(all_segs))
+
+    try:
+        plan = await generar_timeline_narrativo(
+            transcripciones=transcripciones_fmt,
+            fuentes=body.fuentes,
+            titular=body.titular,
+            entradilla=body.entradilla,
+            tipo_pieza=body.tipo_pieza,
+            duracion_objetivo=body.duracion_objetivo,
+            cintillo_label=body.cintillo_label,
+            requiere_locucion=body.incluir_locucion,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    segmentos = plan.get("segmentos", [])
+    total_dur = sum(
+        float(s.get("tiempo_fin", 0)) - float(s.get("tiempo_inicio", 0))
+        for s in segmentos
+    )
+    grafismos_total = sum(len(s.get("grafismos", [])) for s in segmentos)
+
+    return {
+        "ok": True,
+        "titulo_cintillo": plan.get("titulo_cintillo"),
+        "segmentos_count": len(segmentos),
+        "duracion_estimada": round(total_dur, 1),
+        "grafismos_count": grafismos_total,
+        "tiene_locucion": plan.get("locucion") is not None,
+        "plan": plan,
     }
