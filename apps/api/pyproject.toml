@@ -23,7 +23,7 @@ dependencies = [
     "python-multipart",
     "structlog",
     "httpx",
-    "yt-dlp",
+    "yt-dlp>=2026.5.24.234402.dev0",
 ]
 
 [dependency-groups]

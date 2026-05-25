@@ -18,16 +18,61 @@ from pydantic import BaseModel, Field
 
 from src.adapters.llm.factory import get_llm_provider
 from src.core.auth import get_tenant_id
+from src.routes.archivo import (
+    _ffmpeg_download,
+    _is_direct_url,
+    _sanitize_filename,
+    _ytdlp_download,
+    _ytdlp_get_info,
+)
 from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
 from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, ensamblar
-from src.services.narrative_timeline import generar_timeline_narrativo
+from src.services.narrative_timeline import _format_visual_context, generar_timeline_narrativo
+from src.services.visual_analysis import analyze_video_visually
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/montaje", tags=["montaje"])
 
 _STORAGE_BASE = Path("data/storage")
+
+# ---------------------------------------------------------------------------
+# Editorial analysis prompts
+# ---------------------------------------------------------------------------
+
+_SYSTEM_ANALIZAR = (
+    "Eres un redactor jefe de informativos de televisión española. "
+    "Analizas transcripciones de material bruto y generas los metadatos editoriales "
+    "para producir piezas TV. Respondes SOLO con JSON válido, sin markdown."
+)
+
+_PROMPT_ANALIZAR = """Analiza esta transcripción de material de vídeo bruto y genera los metadatos editoriales para producir una pieza televisiva.
+
+TRANSCRIPCIÓN:
+{transcripciones}
+{contexto_visual}
+Responde ÚNICAMENTE con este JSON:
+{{
+  "titular": "Titular directo, máximo 80 caracteres, estilo informativo TV",
+  "entradilla": "Dos o tres frases que resumen la noticia, unas 80 palabras, estilo periodístico",
+  "cuerpo": "Desarrollo informativo con contexto y datos relevantes, 3-5 frases",
+  "tipo_pieza_sugerido": "cola|vtr|nota|total|off|broll|highlights",
+  "duracion_sugerida": 120,
+  "cintillo_label": "ÚLTIMA HORA",
+  "personas_detectadas": [{{"nombre": "Nombre", "cargo": "Cargo"}}],
+  "temas": ["tema1", "tema2", "tema3"],
+  "tono": "informativo|urgente|analítico|positivo",
+  "requiere_locucion": true
+}}
+
+REGLAS:
+- titular: ¿qué pasó? ¿quién? Directo, sin adornos, máximo 80 caracteres
+- tipo_pieza: cola si es recurso visual sin declaraciones; total si hay un único declarante; vtr si hay historia completa; nota si es informativo corto con declaraciones y contexto
+- duracion_sugerida en segundos: cola→15-45, total→15-25, vtr→60-180, nota→30-75
+- Solo incluye personas cuyo nombre aparezca explícitamente en la transcripción o en el análisis visual
+- cintillo_label: ÚLTIMA HORA / ECONOMÍA / POLÍTICA / INTERNACIONAL / SOCIEDAD / DEPORTES / CULTURA"""
+
 
 _PIECE_CONFIGS: dict[str, dict] = {
     "cola":       {"duracion_default": 45,  "criterio": "cortes cortos de 3-8 segundos de planos de recurso y b-roll sin declaraciones, distribuidos por todo el vídeo, para narrar encima", "con_locucion": False},
@@ -306,10 +351,10 @@ async def generar_pieza(
 
 class PiezaEmisionRequest(BaseModel):
     fuentes: list[str] = Field(min_length=1)
-    titular: str
+    titular: str = ""           # auto-generated from transcription if empty
     entradilla: str = ""
     cuerpo: str = ""
-    duracion_objetivo: int = Field(default=300, ge=300)
+    duracion_objetivo: int = Field(default=300, ge=30)
     tipo_pieza: str = "vtr"
     cintillo_label: str = "ÚLTIMA HORA"
     incluir_locucion: bool = True
@@ -384,7 +429,7 @@ async def pieza_emision(
 
     pasos_completados: list[str] = []
 
-    # ── PASO 1: Transcribir fuentes ────────────────────────────────────────────
+    # ── PASO 1: Transcribir fuentes + análisis visual en paralelo ─────────────
     sources: list[Path] = []
     for key in body.fuentes:
         p = (_STORAGE_BASE / key).resolve()
@@ -392,12 +437,57 @@ async def pieza_emision(
             raise HTTPException(status_code=404, detail=f"Source not found: {key}")
         sources.append(p)
 
-    all_segs_trans = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    # Get durations for visual analysis frame budgeting
+    source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
+
+    all_segs_trans, all_visual = await asyncio.gather(
+        asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources]),
+        asyncio.gather(*[
+            analyze_video_visually(src, ffmpeg, dur)
+            for src, dur in zip(sources, source_durations)
+        ]),
+    )
+
     if all(not segs for segs in all_segs_trans):
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
     transcripciones_fmt = _format_transcripts(sources, list(all_segs_trans))
     pasos_completados.append("transcripcion")
+    if any(v.get("fotogramas") for v in all_visual):
+        pasos_completados.append("analisis_visual")
+
+    # Effective duration: don't request more than what the source material can provide.
+    # This prevents the loop-of-shame where 15 s of footage fills a 5-minute slot.
+    max_available = max(
+        (s["end"] for segs in all_segs_trans for s in segs),
+        default=float(body.duracion_objetivo),
+    )
+    duracion_efectiva = min(body.duracion_objetivo, int(max_available * 0.9))
+
+    # ── Auto-generar titular si no se proporcionó ─────────────────────────────
+    titular = body.titular.strip()
+    entradilla = body.entradilla.strip()
+    if not titular:
+        try:
+            source_names_auto = [f.split("/")[-1] for f in body.fuentes]
+            cv = _format_visual_context(list(all_visual), source_names_auto)
+            auto_resp = await get_llm_provider().generate(
+                system=_SYSTEM_ANALIZAR,
+                messages=[{"role": "user", "content": _PROMPT_ANALIZAR.format(
+                    transcripciones=transcripciones_fmt,
+                    contexto_visual=f"\n{cv}\n" if cv else "",
+                )}],
+                temperature=0.3,
+                max_tokens=800,
+            )
+            auto = _parse_llm_json(auto_resp.text.strip())
+            titular = auto.get("titular", "") or "Sin título"
+            if not entradilla:
+                entradilla = auto.get("entradilla", "")
+            pasos_completados.append("auto_analisis")
+        except Exception as exc:
+            logger.warning("Auto-analysis for titular failed: %s", exc)
+            titular = titular or "Sin título"
 
     # ── PASO 2: Generar timeline narrativo (segmentos + grafismos en una llamada)
     plan: dict = {}
@@ -407,12 +497,14 @@ async def pieza_emision(
         plan = await generar_timeline_narrativo(
             transcripciones=transcripciones_fmt,
             fuentes=body.fuentes,
-            titular=body.titular,
-            entradilla=body.entradilla,
+            titular=titular,
+            entradilla=entradilla,
             tipo_pieza=body.tipo_pieza,
-            duracion_objetivo=body.duracion_objetivo,
+            duracion_objetivo=duracion_efectiva,
             cintillo_label=body.cintillo_label,
             requiere_locucion=body.incluir_locucion,
+            duracion_material=int(max_available),
+            analisis_visual=list(all_visual),
         )
         plan_segmentos = plan.get("segmentos", [])
         locucion_text = plan.get("locucion")
@@ -454,7 +546,7 @@ async def pieza_emision(
     try:
         video_key, duration, material_en_loop = await ensamblar(
             base_segs,
-            duracion_objetivo=body.duracion_objetivo,
+            duracion_objetivo=duracion_efectiva,
             normalize_audio=False,   # normalization runs as the final paso, after grafismos+voiceover
         )
     except RuntimeError as exc:
@@ -604,6 +696,11 @@ async def preview_timeline(
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
     transcripciones_fmt = _format_transcripts(sources, list(all_segs))
+    max_available_prev = max(
+        (s["end"] for segs in all_segs for s in segs),
+        default=float(body.duracion_objetivo),
+    )
+    duracion_efectiva_prev = min(body.duracion_objetivo, int(max_available_prev * 0.9))
 
     try:
         plan = await generar_timeline_narrativo(
@@ -612,9 +709,10 @@ async def preview_timeline(
             titular=body.titular,
             entradilla=body.entradilla,
             tipo_pieza=body.tipo_pieza,
-            duracion_objetivo=body.duracion_objetivo,
+            duracion_objetivo=duracion_efectiva_prev,
             cintillo_label=body.cintillo_label,
             requiere_locucion=body.incluir_locucion,
+            duracion_material=int(max_available_prev),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -634,4 +732,142 @@ async def preview_timeline(
         "grafismos_count": grafismos_total,
         "tiene_locucion": plan.get("locucion") is not None,
         "plan": plan,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schemas — analizar material
+# ---------------------------------------------------------------------------
+
+class AnalizarMaterialRequest(BaseModel):
+    fuentes: list[str] = []   # storage keys already in the system
+    url: str = ""             # optional: URL to download + analyze in one call
+
+
+# ---------------------------------------------------------------------------
+# Route — analizar material sin título ni entradilla
+# ---------------------------------------------------------------------------
+
+@router.post("/analizar-material")
+async def analizar_material(
+    body: AnalizarMaterialRequest,
+    tenant_id: str = Depends(get_tenant_id),
+) -> dict:
+    """Transcribe and visually analyze raw video, then return editorial metadata.
+
+    Accepts storage keys, a URL (downloaded on the fly), or both.
+    Returns: titular, entradilla, cuerpo, tipo_pieza_sugerido, personas, etc.
+    The frontend can use these fields to pre-fill the generation form or pass them
+    directly to /pieza-emision without any user input.
+    """
+    if not body.fuentes and not body.url:
+        raise HTTPException(status_code=422, detail="Proporciona 'fuentes' o 'url'")
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=500, detail="ffmpeg not found on PATH")
+
+    fuentes = list(body.fuentes)
+    url_storage_key: str | None = None
+
+    # ── Descargar URL si se proporcionó ──────────────────────────────────────
+    if body.url:
+        if not _is_direct_url(body.url) and not shutil.which("yt-dlp"):
+            raise HTTPException(status_code=500, detail="yt-dlp no está instalado")
+
+        videos_dir = _STORAGE_BASE / "videos"
+        videos_dir.mkdir(parents=True, exist_ok=True)
+
+        if _is_direct_url(body.url):
+            out_path = videos_dir / f"analisis_{uuid4().hex[:8]}.mp4"
+            try:
+                await _ffmpeg_download(body.url, out_path, ffmpeg)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=422, detail=f"Descarga fallida: {exc}")
+        else:
+            try:
+                info = await _ytdlp_get_info(body.url)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=422, detail=f"No se pudo leer la URL: {exc}")
+
+            safe = _sanitize_filename(info.get("title", "video"))
+            out_path = videos_dir / f"{safe}.mp4"
+            if out_path.exists():
+                out_path = videos_dir / f"{safe}_{uuid4().hex[:6]}.mp4"
+            try:
+                await _ytdlp_download(body.url, out_path)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=422, detail=f"Descarga fallida: {exc}")
+
+        if not out_path.exists():
+            raise HTTPException(status_code=500, detail="La descarga finalizó pero no se encontró el fichero")
+
+        url_storage_key = f"videos/{out_path.name}"
+        fuentes.append(url_storage_key)
+
+    # ── Resolver paths ────────────────────────────────────────────────────────
+    sources: list[Path] = []
+    for key in fuentes:
+        p = (_STORAGE_BASE / key).resolve()
+        if not p.exists():
+            raise HTTPException(status_code=404, detail=f"Fuente no encontrada: {key}")
+        sources.append(p)
+
+    # ── Transcripción + análisis visual en paralelo ───────────────────────────
+    source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
+
+    all_segs, all_visual = await asyncio.gather(
+        asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources]),
+        asyncio.gather(*[
+            analyze_video_visually(src, ffmpeg, dur)
+            for src, dur in zip(sources, source_durations)
+        ]),
+    )
+
+    if all(not segs for segs in all_segs):
+        raise HTTPException(status_code=422, detail="No se pudo transcribir ninguna fuente")
+
+    transcripciones_fmt = _format_transcripts(sources, list(all_segs))
+    max_available = max(
+        (s["end"] for segs in all_segs for s in segs),
+        default=0.0,
+    )
+
+    # ── Formatear contexto visual ─────────────────────────────────────────────
+    source_names = [f.split("/")[-1] for f in fuentes]
+    contexto_visual = _format_visual_context(list(all_visual), source_names)
+
+    # ── LLM: generar metadatos editoriales ────────────────────────────────────
+    prompt = _PROMPT_ANALIZAR.format(
+        transcripciones=transcripciones_fmt,
+        contexto_visual=f"\n{contexto_visual}\n" if contexto_visual else "",
+    )
+    llm = get_llm_provider()
+    try:
+        response = await llm.generate(
+            system=_SYSTEM_ANALIZAR,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        analisis = _parse_llm_json(response.text.strip())
+    except Exception as exc:
+        logger.error("LLM material analysis failed: %s", exc)
+        raise HTTPException(status_code=422, detail=f"Análisis LLM fallido: {exc}")
+
+    return {
+        "ok": True,
+        "titular": analisis.get("titular", ""),
+        "entradilla": analisis.get("entradilla", ""),
+        "cuerpo": analisis.get("cuerpo", ""),
+        "tipo_pieza_sugerido": analisis.get("tipo_pieza_sugerido", "cola"),
+        "duracion_sugerida": int(analisis.get("duracion_sugerida", 60)),
+        "cintillo_label": analisis.get("cintillo_label", "ÚLTIMA HORA"),
+        "personas_detectadas": analisis.get("personas_detectadas", []),
+        "temas": analisis.get("temas", []),
+        "tono": analisis.get("tono", "informativo"),
+        "requiere_locucion": bool(analisis.get("requiere_locucion", False)),
+        "fuentes": fuentes,
+        "url_storage_key": url_storage_key,
+        "duracion_material": round(max_available, 1),
     }

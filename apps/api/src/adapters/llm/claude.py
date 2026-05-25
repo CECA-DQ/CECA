@@ -1,12 +1,15 @@
+import base64
 from collections.abc import AsyncIterator
 
 from anthropic import AsyncAnthropic
 
 from .base import LLMProvider, LLMResponse
 
-# Pricing per million tokens (update when Anthropic publishes new rates)
+# claude-sonnet-4-6 pricing per million tokens (May 2026)
 _INPUT_COST_PER_M = 3.0
 _OUTPUT_COST_PER_M = 15.0
+
+_VISION_MODEL = "claude-sonnet-4-6"
 
 
 class ClaudeProvider(LLMProvider):
@@ -43,7 +46,44 @@ class ClaudeProvider(LLMProvider):
         messages: list[dict],
         images: list[bytes],
     ) -> LLMResponse:
-        raise NotImplementedError
+        """Send images alongside the last user message using Claude's vision API."""
+        image_blocks = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(img).decode(),
+                },
+            }
+            for img in images
+        ]
+
+        augmented = list(messages)
+        if augmented and augmented[-1]["role"] == "user":
+            existing = augmented[-1]["content"]
+            text_block = (
+                existing
+                if isinstance(existing, list)
+                else [{"type": "text", "text": existing}]
+            )
+            augmented[-1] = {"role": "user", "content": text_block + image_blocks}
+        else:
+            augmented.append({"role": "user", "content": image_blocks})
+
+        response = await self._client.messages.create(
+            model=_VISION_MODEL,
+            system=system,
+            messages=augmented,
+            max_tokens=2000,
+        )
+        return LLMResponse(
+            text=response.content[0].text,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            model=response.model,
+            cost=self.estimate_cost(response.usage.input_tokens, response.usage.output_tokens),
+        )
 
     async def stream(self, system: str, messages: list[dict]) -> AsyncIterator[str]:
         raise NotImplementedError
