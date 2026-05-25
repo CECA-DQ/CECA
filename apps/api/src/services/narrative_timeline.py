@@ -3,17 +3,23 @@
 Takes raw transcription (and optional visual frame analysis) and produces
 a structured montage plan: segments in narrative order with content-aware
 graphic cues. The LLM acts as a senior Mañaneros 360 producer.
+
+Architecture principle:
+  The LLM decides WHAT to show (which grafismo type, what text).
+  The code decides WHEN to show it (inicio_relativo, duracion) using
+  deterministic rules and word-level timestamp search.
 """
 
 import json
 import logging
+import re as _re
 
 from src.adapters.llm.factory import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prompt
+# Prompt — LLM only decides WHAT, never WHEN
 # ---------------------------------------------------------------------------
 
 _SYSTEM = (
@@ -37,9 +43,9 @@ TRANSCRIPCIONES DEL MATERIAL BRUTO:
 Construye el plan de montaje siguiendo estas reglas de producción TV:
 
 1. ESTRUCTURA NARRATIVA OBLIGATORIA:
-   - Segmento 1 → tipo "intro": broll de 6-10s. El cintillo entra aquí en segundo 2.
+   - Segmento 1 → tipo "intro": broll de 6-10s.
    - Segmentos 2-N → alterna "broll" y "declaracion". Empieza con broll.
-   - Segmento final → tipo "cierre": broll de 6-10s. El cintillo reaparece.
+   - Segmento final → tipo "cierre": broll de 6-10s.
 
 2. DETECCIÓN DE DECLARACIONES:
    Lee la transcripción. Cuando detectes que alguien está hablando, crea un segmento
@@ -47,26 +53,31 @@ Construye el plan de montaje siguiendo estas reglas de producción TV:
    nombre real de la persona — usando el ANÁLISIS VISUAL si está disponible.
    Si no aparece el nombre explícitamente, NO añadas el grafismo.
 
-3. GRAFISMOS POR SEGMENTO (campo "grafismos", lista puede ser vacía []):
-   - Segmento "intro": añade cintillo. inicio_relativo=2, duracion=13.
-   - Segmento "declaracion" con nombre identificado: añade rotulo_persona. inicio_relativo=0.5, duracion=7.
-   - Segmento "declaracion" sin nombre identificado: grafismos=[].
-   - Segmento "broll" con dato numérico importante en transcripción: añade dato. inicio_relativo=1, duracion=6.
-   - Segmento "cierre": añade cintillo. inicio_relativo=1, duracion=15.
-   - NO añadas grafismos a segmentos de broll sin contenido relevante.
-   NOTA: los grafismos pueden extenderse más allá del segmento — durations son en la línea de tiempo final.
+3. GRAFISMOS POR SEGMENTO (campo "grafismos", puede ser []):
+   IMPORTANTE: NO incluyas inicio_relativo ni duracion — el sistema los calcula solo.
+   Solo indica tipo, texto_principal y texto_secundario.
 
-3b. FRASES CLAVE (tipo "frase_clave") — añade dinamismo y refuerza el mensaje:
-   - En cada segmento "declaracion", lee el CONTEXTO COMPLETO de la transcripción para
-     identificar la frase más impactante o citrable de ese declarante en ese momento.
-   - Usa los timestamps de la transcripción para calcular en qué segundo del segmento
-     se pronuncia esa frase y ponlo en inicio_relativo.
-   - texto_principal: la frase exacta, máximo 7 palabras. Trunca con "..." si hace falta.
-     Usa mayúsculas solo para énfasis (no todo en mayúsculas).
-   - duracion: 4.0 segundos siempre.
+   - Segmento "intro": añade un grafismo tipo "titular".
+     texto_principal = "{cintillo_label} — [titular breve, max 50 chars]"
+   - Segmento "declaracion" con nombre identificado: añade "rotulo_persona".
+     texto_principal = nombre completo, texto_secundario = cargo o filiación.
+   - Segmento "declaracion" sin nombre identificado: grafismos=[].
+   - Segmento "broll" con dato numérico relevante en la transcripción: añade "dato".
+     texto_principal = el dato concreto (ej: "12.000 fallecidos").
+   - Segmento "cierre": añade "titular" (mismo texto que intro).
+   - Segmentos "broll" sin dato relevante: grafismos=[].
+
+3b. FRASE CLAVE — cita el momento más impactante de cada declaración:
+   En cada segmento "declaracion" con una frase realmente citrable, añade
+   un grafismo tipo "frase_clave". REGLAS ESTRICTAS:
+   - texto_principal: copia las palabras EXACTAS de la transcripción, máximo 7 palabras.
+     El sistema buscará esas palabras literalmente en el audio para sincronizarlas.
+     Si necesitas truncar, añade "..." solo al final.
+     USA MINÚSCULAS — el sistema hace el matching sin distinción de mayúsculas.
+   - texto_secundario: siempre vacío "".
    - Máximo 1 frase_clave por segmento declaracion.
    - NO añadas frase_clave en broll, intro ni cierre.
-   - Si la declaración no tiene ninguna frase realmente impactante, no la añadas.
+   - Si la declaración no tiene ninguna frase impactante, no la añadas.
 
 4. DURACIÓN — REGLA ABSOLUTA, NO NEGOCIABLE:
    - La suma total de (tiempo_fin - tiempo_inicio) de TODOS los segmentos DEBE estar
@@ -98,8 +109,6 @@ RESPONDE ÚNICAMENTE CON ESTE JSON (sin comentarios, sin markdown):
       "grafismos": [
         {{
           "tipo": "titular",
-          "inicio_relativo": 2.0,
-          "duracion": 13.0,
           "texto_principal": "{cintillo_label} — titulo breve",
           "texto_secundario": ""
         }}
@@ -114,16 +123,12 @@ RESPONDE ÚNICAMENTE CON ESTE JSON (sin comentarios, sin markdown):
       "grafismos": [
         {{
           "tipo": "rotulo_persona",
-          "inicio_relativo": 0.5,
-          "duracion": 7.0,
           "texto_principal": "Nombre del declarante",
           "texto_secundario": "Cargo o filiación"
         }},
         {{
           "tipo": "frase_clave",
-          "inicio_relativo": 3.5,
-          "duracion": 4.0,
-          "texto_principal": "No vamos a ceder ni un paso",
+          "texto_principal": "es usted un psicópata",
           "texto_secundario": ""
         }}
       ]
@@ -175,6 +180,117 @@ def _format_visual_context(analisis_list: list[dict], source_names: list[str]) -
 
 
 # ---------------------------------------------------------------------------
+# Grafismo timing — deterministic rules + word-level phrase search
+# ---------------------------------------------------------------------------
+
+# (segment_tipo, grafismo_tipo) → (inicio_relativo, duracion)
+_TIMING_RULES: dict[tuple[str, str], tuple[float, float]] = {
+    ("intro",       "titular"):        (2.0, 13.0),
+    ("cierre",      "titular"):        (1.0, 15.0),
+    ("declaracion", "rotulo_persona"): (0.5,  6.0),
+    ("broll",       "dato"):           (1.0,  6.0),
+    ("declaracion", "dato"):           (1.0,  6.0),
+    ("intro",       "dato"):           (1.0,  6.0),
+}
+_FRASE_CLAVE_DURACION = 4.0
+_DEFAULT_TIMING = (1.0, 5.0)
+
+
+def _normalize_tokens(text: str) -> list[str]:
+    """Lowercase, strip trailing ellipsis, remove punctuation → token list."""
+    text = _re.sub(r"\.\.\.$", "", text.strip().lower())
+    return [t for t in _re.sub(r"[^\w\sáéíóúüñ]", "", text).split() if t]
+
+
+def _find_phrase_timestamp(
+    phrase: str,
+    words: list[dict],
+    seg_start: float,
+    seg_end: float,
+) -> float | None:
+    """Return absolute start time where `phrase` occurs in the word timeline.
+
+    Searches a sliding window in [seg_start-0.5s, seg_end+0.5s].
+    Requires ≥55% token overlap to avoid false positives on short phrases.
+    Returns None when not found — caller drops the frase_clave rather than guessing.
+    """
+    phrase_tokens = _normalize_tokens(phrase)
+    n = len(phrase_tokens)
+    if n == 0 or not words:
+        return None
+
+    scope = [
+        w for w in words
+        if w["start"] >= seg_start - 0.5 and w["start"] <= seg_end + 0.5
+    ]
+    if len(scope) < n:
+        return None
+
+    best_ratio = 0.0
+    best_time: float | None = None
+
+    for i in range(len(scope) - n + 1):
+        window = scope[i : i + n]
+        window_tokens = _normalize_tokens(" ".join(w["word"] for w in window))
+        matches = sum(1 for pt, wt in zip(phrase_tokens, window_tokens) if pt == wt)
+        ratio = matches / n
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_time = window[0]["start"]
+
+    return best_time if best_ratio >= 0.55 else None
+
+
+def _assign_grafismo_timings(
+    plan: dict,
+    all_words: list[list[dict]] | None,
+) -> None:
+    """Add inicio_relativo and duracion to every grafismo (mutates plan in-place).
+
+    cintillo / rotulo / dato → deterministic table lookup.
+    frase_clave              → word-level transcript search; dropped if not found.
+    """
+    n_sources = len(all_words) if all_words else 0
+
+    for seg in plan.get("segmentos", []):
+        seg_tipo = seg.get("tipo", "broll")
+        seg_start = float(seg.get("tiempo_inicio", 0.0))
+        seg_end = float(seg.get("tiempo_fin", seg_start + 8.0))
+        src_idx = int(seg.get("fuente_index", 0))
+        words = all_words[src_idx] if all_words and src_idx < n_sources else []
+
+        kept: list[dict] = []
+        for g in seg.get("grafismos", []):
+            g_tipo = g.get("tipo", "")
+
+            if g_tipo == "frase_clave":
+                phrase = g.get("texto_principal", "")
+                ts = _find_phrase_timestamp(phrase, words, seg_start, seg_end)
+                if ts is None:
+                    logger.debug(
+                        "frase_clave '%s' not found in word transcript — dropping", phrase[:50]
+                    )
+                    continue  # never guess — drop it
+                g["inicio_relativo"] = round(max(0.0, ts - seg_start), 2)
+                g["duracion"] = _FRASE_CLAVE_DURACION
+            else:
+                key = (seg_tipo, g_tipo)
+                inicio, duracion = _TIMING_RULES.get(key, _DEFAULT_TIMING)
+                g["inicio_relativo"] = inicio
+                g["duracion"] = duracion
+
+            kept.append(g)
+
+        seg["grafismos"] = kept
+
+    logger.info(
+        "Grafismo timings assigned: %d segments, %d grafismos total",
+        len(plan.get("segmentos", [])),
+        sum(len(s.get("grafismos", [])) for s in plan.get("segmentos", [])),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public function
 # ---------------------------------------------------------------------------
 
@@ -189,14 +305,15 @@ async def generar_timeline_narrativo(
     requiere_locucion: bool = False,
     duracion_material: int | None = None,
     analisis_visual: list[dict] | None = None,
+    all_words: list[list[dict]] | None = None,
 ) -> dict:
     """Call the LLM once and get back a full montage plan.
 
-    Returns the raw plan dict. Callers are responsible for converting
-    relative graphic timings to absolute positions after assembly.
+    The LLM returns segment selections and grafismo text only.
+    Grafismo timings are then assigned deterministically by _assign_grafismo_timings,
+    using word-level transcript data for frase_clave placement.
     """
     duracion_mat = duracion_material or duracion_objetivo
-    # Segments needed: one per ~12 s, minimum 3, maximum so they don't exceed budget
     min_segs = max(3, duracion_objetivo // 15)
     max_segs = max(min_segs + 2, duracion_objetivo // 8)
 
@@ -232,6 +349,7 @@ async def generar_timeline_narrativo(
 
     plan = _parse_plan(response.text.strip())
     _validate_plan(plan, len(fuentes), duracion_objetivo)
+    _assign_grafismo_timings(plan, all_words)
     logger.info(
         "Narrative timeline generated: %d segments, locucion=%s",
         len(plan.get("segmentos", [])),
@@ -256,7 +374,10 @@ def _parse_plan(raw: str) -> dict:
 
 
 def _validate_plan(plan: dict, n_fuentes: int, duracion_objetivo: int | None = None) -> None:
-    """Validate structure and hard-enforce the duration budget."""
+    """Validate structure and hard-enforce the duration budget.
+
+    Does NOT set grafismo timings — that is handled by _assign_grafismo_timings.
+    """
     _PLACEHOLDER_NAMES = {"declarante", "desconocido", "unknown", "speaker", "persona", ""}
 
     segs = plan.get("segmentos", [])
@@ -272,8 +393,7 @@ def _validate_plan(plan: dict, n_fuentes: int, duracion_objetivo: int | None = N
             seg["tiempo_fin"] = seg["tiempo_inicio"] + 8
 
         # Clamp individual segment to 12 s max
-        seg_dur = seg["tiempo_fin"] - seg["tiempo_inicio"]
-        if seg_dur > 12.0:
+        if seg["tiempo_fin"] - seg["tiempo_inicio"] > 12.0:
             seg["tiempo_fin"] = seg["tiempo_inicio"] + 12.0
 
         # Ensure grafismos is a list
@@ -289,16 +409,6 @@ def _validate_plan(plan: dict, n_fuentes: int, duracion_objetivo: int | None = N
             )
         ]
 
-        # Validate grafismo timings — duration is NOT clamped to the segment length
-        # (grafismos intentionally span cuts in standard TV production practice).
-        for g in seg["grafismos"]:
-            g["inicio_relativo"] = max(0.0, float(g.get("inicio_relativo", 0)))
-            g["duracion"] = max(1.0, float(g.get("duracion", 5)))
-
-    # ── Hard duration budget enforcement ─────────────────────────────────────
-    # The LLM sometimes ignores the duration constraint when given long material.
-    # This post-processing step mathematically trims the plan to stay within budget
-    # regardless of what the model returned.
     if duracion_objetivo and segs:
         _enforce_duration_budget(plan, duracion_objetivo)
 
@@ -319,14 +429,13 @@ def _enforce_duration_budget(plan: dict, duracion_objetivo: int) -> None:
 
     total = sum(seg_dur(s) for s in segs)
     if total <= budget:
-        return  # already within budget, nothing to do
+        return
 
     logger.warning(
-        "LLM plan exceeded duration budget: %.1fs requested vs %.1fs budget — trimming",
+        "LLM plan exceeded duration budget: %.1fs vs %.1fs budget — trimming",
         total, budget,
     )
 
-    # Separate structural bookends from trimable middle content
     first = segs[:1]
     last = segs[-1:] if len(segs) > 1 else []
     middle = segs[1:-1] if len(segs) > 2 else []
@@ -346,7 +455,7 @@ def _enforce_duration_budget(plan: dict, duracion_objetivo: int) -> None:
             if leftover >= 4.0:
                 seg["tiempo_fin"] = seg["tiempo_inicio"] + leftover
                 kept.append(seg)
-            break  # budget exhausted
+            break
 
     plan["segmentos"] = first + kept + last
     for i, s in enumerate(plan["segmentos"], 1):

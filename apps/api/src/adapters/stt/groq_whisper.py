@@ -16,7 +16,7 @@ from pathlib import Path
 
 from groq import AsyncGroq
 
-from .base import STTProvider, Transcript, TranscriptSegment
+from .base import STTProvider, Transcript, TranscriptSegment, TranscriptWord
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +67,12 @@ class GroqWhisperProvider(STTProvider):
             file=("audio.mp3", audio, "audio/mpeg"),
             language=language,
             response_format="verbose_json",
-            timestamp_granularities=["segment"] if with_timestamps else [],
+            timestamp_granularities=["word", "segment"] if with_timestamps else [],
         )
 
-        # Groq returns segments as dicts; OpenAI returns objects — handle both.
-        def _val(seg, key):
-            return seg[key] if isinstance(seg, dict) else getattr(seg, key)
+        # Groq returns segments/words as dicts; OpenAI returns objects — handle both.
+        def _val(obj, key):
+            return obj[key] if isinstance(obj, dict) else getattr(obj, key)
 
         segments = [
             TranscriptSegment(
@@ -83,8 +83,18 @@ class GroqWhisperProvider(STTProvider):
             for seg in (response.segments or [])
         ]
 
+        words_raw = getattr(response, "words", None) or []
+        words = [
+            TranscriptWord(
+                start=_val(w, "start") + offset_seconds,
+                end=_val(w, "end") + offset_seconds,
+                word=_val(w, "word"),
+            )
+            for w in words_raw
+        ]
+
         lang = response.language if not isinstance(response, dict) else response.get("language")
-        return Transcript(language=lang or language or "es", segments=segments)
+        return Transcript(language=lang or language or "es", segments=segments, words=words)
 
     async def _transcribe_chunked(
         self,
@@ -101,15 +111,17 @@ class GroqWhisperProvider(STTProvider):
         logger.info("Split audio into %d chunks for Groq Whisper", len(chunks))
 
         all_segments: list[TranscriptSegment] = []
+        all_words: list[TranscriptWord] = []
         detected_language: str = language or "es"
 
         for chunk_bytes, offset in chunks:
             result = await self._transcribe_single(chunk_bytes, language, with_timestamps, offset_seconds=offset)
             all_segments.extend(result.segments)
+            all_words.extend(result.words)
             if result.language:
                 detected_language = result.language
 
-        return Transcript(language=detected_language, segments=all_segments)
+        return Transcript(language=detected_language, segments=all_segments, words=all_words)
 
 
 async def _split_audio_chunks(

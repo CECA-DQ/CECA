@@ -35,6 +35,79 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/montaje", tags=["montaje"])
 
+
+def _build_cut_points(words: list[dict], segs: list[dict]) -> list[float]:
+    """Build a list of valid cut times from word-level silence gaps (preferred) or segment edges.
+
+    A silence gap is defined as ≥250 ms between consecutive words. The cut point is
+    placed at the midpoint of the gap so it sits in the quietest part of the audio.
+    """
+    if words:
+        points: list[float] = []
+        if words:
+            points.append(words[0]["start"])
+        for i in range(len(words) - 1):
+            gap = words[i + 1]["start"] - words[i]["end"]
+            if gap >= 0.25:
+                points.append((words[i]["end"] + words[i + 1]["start"]) / 2.0)
+        if words:
+            points.append(words[-1]["end"])
+        return sorted(set(round(p, 3) for p in points))
+
+    # Fallback: use segment start/end boundaries
+    return sorted({s["start"] for s in segs} | {s["end"] for s in segs})
+
+
+def _nearest_cut(cut_points: list[float], t: float, tolerance: float) -> float:
+    if not cut_points:
+        return t
+    closest = min(cut_points, key=lambda x: abs(x - t))
+    return closest if abs(closest - t) <= tolerance else t
+
+
+def _snap_segment_boundaries(
+    plan_segs: list[dict],
+    all_segs_trans: list[list[dict]],
+    all_words: list[list[dict]] | None = None,
+    tolerance: float = 2.5,
+) -> list[dict]:
+    """Align LLM-chosen timestamps to the nearest silence gap in the audio.
+
+    When word-level timestamps are available (all_words), cuts are placed at
+    natural speech pauses (≥250 ms silence between words), giving frame-accurate
+    audio cuts.  Falls back to segment boundaries when words are absent.
+    """
+    if not any(all_segs_trans):
+        return plan_segs
+
+    n = len(all_segs_trans)
+    source_cuts: list[list[float]] = [
+        _build_cut_points(
+            (all_words[i] if all_words and i < len(all_words) else []),
+            all_segs_trans[i],
+        )
+        for i in range(n)
+    ]
+
+    for seg in plan_segs:
+        src_idx = min(int(seg.get("fuente_index", 0)), n - 1)
+        cuts = source_cuts[src_idx]
+
+        raw_start = float(seg.get("tiempo_inicio", 0.0))
+        raw_end = float(seg.get("tiempo_fin", raw_start + 8.0))
+
+        snapped_start = _nearest_cut(cuts, raw_start, tolerance)
+        snapped_end = _nearest_cut(cuts, raw_end, tolerance)
+
+        # Never let snapping shrink a segment below 3 s
+        if snapped_end - snapped_start < 3.0:
+            snapped_end = snapped_start + max(3.0, raw_end - raw_start)
+
+        seg["tiempo_inicio"] = round(snapped_start, 2)
+        seg["tiempo_fin"] = round(snapped_end, 2)
+
+    return plan_segs
+
 _STORAGE_BASE = Path("data/storage")
 
 # ---------------------------------------------------------------------------
@@ -146,7 +219,12 @@ class GenerarPiezaRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _transcribe_source(source: Path, ffmpeg: str) -> list[dict]:
+async def _transcribe_source(source: Path, ffmpeg: str) -> tuple[list[dict], list[dict]]:
+    """Transcribe a video source, returning (segments, words).
+
+    segments: [{"start", "end", "text"}]
+    words:    [{"start", "end", "word"}] — empty list if provider doesn't support word timestamps
+    """
     from src.adapters.stt.factory import get_stt_provider
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
@@ -162,10 +240,12 @@ async def _transcribe_source(source: Path, ffmpeg: str) -> list[dict]:
         audio_bytes = Path(mp3_path).read_bytes()
         stt = get_stt_provider()
         result = await stt.transcribe(audio=audio_bytes, language=None, with_timestamps=True, with_diarization=False)
-        return [{"start": s.start, "end": s.end, "text": s.text} for s in result.segments]
+        segs = [{"start": s.start, "end": s.end, "text": s.text} for s in result.segments]
+        words = [{"start": w.start, "end": w.end, "word": w.word} for w in result.words]
+        return segs, words
     except Exception as exc:
         logger.warning("Transcription failed for %s: %s", source.name, exc)
-        return []
+        return [], []
     finally:
         Path(mp3_path).unlink(missing_ok=True)
 
@@ -280,11 +360,12 @@ async def generar_pieza(
             raise HTTPException(status_code=404, detail=f"Source not found: {key}")
         sources.append(p)
 
-    all_segments = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    all_trans = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    all_segments = [t[0] for t in all_trans]
     if all(not segs for segs in all_segments):
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
-    transcripciones_fmt = _format_transcripts(sources, list(all_segments))
+    transcripciones_fmt = _format_transcripts(sources, all_segments)
     quiere_locucion = body.generar_locucion and config["con_locucion"]
 
     try:
@@ -440,18 +521,20 @@ async def pieza_emision(
     # Get durations for visual analysis frame budgeting
     source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
 
-    all_segs_trans, all_visual = await asyncio.gather(
+    all_trans_raw, all_visual = await asyncio.gather(
         asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources]),
         asyncio.gather(*[
             analyze_video_visually(src, ffmpeg, dur)
             for src, dur in zip(sources, source_durations)
         ]),
     )
+    all_segs_trans = [t[0] for t in all_trans_raw]
+    all_words_trans = [t[1] for t in all_trans_raw]
 
     if all(not segs for segs in all_segs_trans):
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
-    transcripciones_fmt = _format_transcripts(sources, list(all_segs_trans))
+    transcripciones_fmt = _format_transcripts(sources, all_segs_trans)
     pasos_completados.append("transcripcion")
     if any(v.get("fotogramas") for v in all_visual):
         pasos_completados.append("analisis_visual")
@@ -505,12 +588,19 @@ async def pieza_emision(
             requiere_locucion=body.incluir_locucion,
             duracion_material=int(max_available),
             analisis_visual=list(all_visual),
+            all_words=all_words_trans,
         )
         plan_segmentos = plan.get("segmentos", [])
         locucion_text = plan.get("locucion")
         pasos_completados.append("timeline_narrativo")
     except Exception as exc:
         logger.error("Narrative timeline failed, falling back to basic selection: %s", exc)
+
+    # Snap LLM timestamps to silence gaps in the audio for clean cuts
+    if plan_segmentos:
+        plan_segmentos = _snap_segment_boundaries(
+            plan_segmentos, all_segs_trans, all_words_trans
+        )
 
     # Fallback: if timeline failed, use basic segment selection
     if not plan_segmentos:
@@ -557,16 +647,24 @@ async def pieza_emision(
     # ── PASO 4: Convertir grafismos relativos → absolutos y aplicar ───────────
     titulo_cintillo = plan.get("titulo_cintillo") or f"{body.cintillo_label} — {body.titular[:50]}"
 
-    if plan_segmentos and plan.get("titulo_cintillo"):
-        # Use content-aware graphics from the narrative plan
+    # Use plan-based grafismos whenever the timeline was generated (regardless of
+    # whether titulo_cintillo came back empty — the fallback title is already set above)
+    if plan_segmentos:
         elementos = _plan_to_grafismos(plan_segmentos, base_segs, duration)
+        # Ensure at least one cintillo element exists (LLM sometimes omits intro grafismo)
+        has_cintillo = any(e.tipo == "titular" for e in elementos)
+        if not has_cintillo:
+            elementos.insert(0, GrafismoEl(
+                tipo="titular",
+                texto_principal=titulo_cintillo,
+                tiempo_inicio=2.0,
+                duracion=13.0,
+            ))
     else:
-        # Fallback structural graphics
         dur_int = max(30, int(duration))
-        short_title = f"{body.cintillo_label} — {body.titular[:45]}"
         elementos = [
-            GrafismoEl(tipo="titular", texto_principal=short_title, tiempo_inicio=2.0, duracion=13.0),
-            GrafismoEl(tipo="titular", texto_principal=short_title,
+            GrafismoEl(tipo="titular", texto_principal=titulo_cintillo, tiempo_inicio=2.0, duracion=13.0),
+            GrafismoEl(tipo="titular", texto_principal=titulo_cintillo,
                        tiempo_inicio=max(15.0, dur_int - 22.0), duracion=18.0),
         ]
 
@@ -584,9 +682,10 @@ async def pieza_emision(
                 )
             video_key = grafismo_key
             pasos_completados.append("grafismos")
-        except RuntimeError as exc:
+        except Exception as exc:
+            import traceback as _tb
             warning_grafismo = str(exc)
-            logger.error("Grafismo application failed: %s", exc)
+            logger.error("Grafismo application failed: %s\n%s", exc, _tb.format_exc())
 
     # ── PASO 4: Sintetizar locución y mezclar con el vídeo ────────────────────
     if body.incluir_locucion and locucion_text:
@@ -691,11 +790,13 @@ async def preview_timeline(
             raise HTTPException(status_code=404, detail=f"Source not found: {key}")
         sources.append(p)
 
-    all_segs = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    all_trans_prev = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    all_segs = [t[0] for t in all_trans_prev]
+    all_words_prev = [t[1] for t in all_trans_prev]
     if all(not s for s in all_segs):
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
 
-    transcripciones_fmt = _format_transcripts(sources, list(all_segs))
+    transcripciones_fmt = _format_transcripts(sources, all_segs)
     max_available_prev = max(
         (s["end"] for segs in all_segs for s in segs),
         default=float(body.duracion_objetivo),
@@ -713,6 +814,7 @@ async def preview_timeline(
             cintillo_label=body.cintillo_label,
             requiere_locucion=body.incluir_locucion,
             duracion_material=int(max_available_prev),
+            all_words=all_words_prev,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -816,18 +918,19 @@ async def analizar_material(
     # ── Transcripción + análisis visual en paralelo ───────────────────────────
     source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
 
-    all_segs, all_visual = await asyncio.gather(
+    all_trans_anal, all_visual = await asyncio.gather(
         asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources]),
         asyncio.gather(*[
             analyze_video_visually(src, ffmpeg, dur)
             for src, dur in zip(sources, source_durations)
         ]),
     )
+    all_segs = [t[0] for t in all_trans_anal]
 
     if all(not segs for segs in all_segs):
         raise HTTPException(status_code=422, detail="No se pudo transcribir ninguna fuente")
 
-    transcripciones_fmt = _format_transcripts(sources, list(all_segs))
+    transcripciones_fmt = _format_transcripts(sources, all_segs)
     max_available = max(
         (s["end"] for segs in all_segs for s in segs),
         default=0.0,

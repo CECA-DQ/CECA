@@ -12,10 +12,19 @@ class TranscriptSegment:
 
 
 @dataclass
+class TranscriptWord:
+    """A single timed word — populated when word-level timestamps are available."""
+    start: float
+    end: float
+    word: str
+
+
+@dataclass
 class Transcript:
     """Full transcription result returned by any STT provider."""
     language: str
     segments: list[TranscriptSegment]
+    words: list[TranscriptWord] = field(default_factory=list)
     full_text: str = field(init=False)
 
     def __post_init__(self) -> None:
