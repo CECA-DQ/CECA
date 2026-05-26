@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/archivo", tags=["archivo"])
 
+# Prevents concurrent yt-dlp downloads of the same URL from racing to the
+# same output path and corrupting the file.
+_download_locks: dict[str, asyncio.Lock] = {}
+
 _STORAGE_BASE = Path("data/storage")
 _THUMBNAILS_DIR = Path("data/storage/thumbnails")
 _CHUNK_SECONDS = 8  # segment length for bruto indexing
@@ -376,8 +380,8 @@ async def _ytdlp_download(url: str, out_path: Path) -> None:
     cmd = _ytdlp_cmd() + [
         "--no-playlist",
         "--format",
-        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]"
+        "/bestvideo[height<=480]+bestaudio/best[height<=480]/best",
         "--merge-output-format", "mp4",
         "--output", str(out_path),
         "--no-progress",
@@ -543,17 +547,22 @@ async def ingest_url(
         safe_name = _sanitize_filename(titulo_detectado)
         out_path = videos_dir / f"{safe_name}.mp4"
 
-        # Avoid collision with existing file
-        if out_path.exists():
-            out_path = videos_dir / f"{safe_name}_{uuid4().hex[:6]}.mp4"
-
-        try:
-            await _ytdlp_download(body.url, out_path)
-        except RuntimeError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Descarga fallida: {exc}",
-            )
+        # Serialize concurrent downloads of the same URL.
+        # If two requests arrive simultaneously both will enter the lock; the
+        # second will find the file already downloaded and skip the download.
+        if body.url not in _download_locks:
+            _download_locks[body.url] = asyncio.Lock()
+        async with _download_locks[body.url]:
+            if not out_path.exists():
+                try:
+                    await _ytdlp_download(body.url, out_path)
+                except RuntimeError as exc:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Descarga fallida: {exc}",
+                    )
+            else:
+                logger.info("Reusing already-downloaded file: %s", out_path.name)
 
     if not out_path.exists():
         raise HTTPException(status_code=500, detail="La descarga finalizó pero no se encontró el fichero")
