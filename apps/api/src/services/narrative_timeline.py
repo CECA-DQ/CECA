@@ -247,19 +247,29 @@ def _assign_grafismo_timings(
 ) -> None:
     """Add inicio_relativo and duracion to every grafismo (mutates plan in-place).
 
-    cintillo / rotulo / dato → deterministic table lookup.
-    frase_clave              → word-level transcript search; dropped if not found.
+    Rule A (declaracion segments):
+      - Segment >= 14s (sequential): name shows 1.5→8.5s, quote shows 9.0→min(dur-1,14)s.
+      - Segment < 14s (simultaneous): name+quote shown together 1.5→(dur-0.5)s.
+        rotulo_persona renamed to rotulo_persona_simultaneo (grafismo.py renders it higher).
+    Other types → deterministic lookup table.
+    frase_clave → word-level search validates phrase exists; timing from Rule A, not phrase ts.
     """
     n_sources = len(all_words) if all_words else 0
 
     for seg in plan.get("segmentos", []):
         seg_tipo = seg.get("tipo", "broll")
         seg_start = float(seg.get("tiempo_inicio", 0.0))
-        seg_end = float(seg.get("tiempo_fin", seg_start + 8.0))
-        src_idx = int(seg.get("fuente_index", 0))
-        words = all_words[src_idx] if all_words and src_idx < n_sources else []
+        seg_end   = float(seg.get("tiempo_fin", seg_start + 8.0))
+        seg_dur   = seg_end - seg_start
+        src_idx   = int(seg.get("fuente_index", 0))
+        words     = all_words[src_idx] if all_words and src_idx < n_sources else []
+
+        is_short   = seg_dur < 14.0
+        has_rotulo = any(g.get("tipo") == "rotulo_persona" for g in seg.get("grafismos", []))
 
         kept: list[dict] = []
+        frase_pendiente: dict | None = None
+
         for g in seg.get("grafismos", []):
             g_tipo = g.get("tipo", "")
 
@@ -267,19 +277,40 @@ def _assign_grafismo_timings(
                 phrase = g.get("texto_principal", "")
                 ts = _find_phrase_timestamp(phrase, words, seg_start, seg_end)
                 if ts is None:
-                    logger.debug(
-                        "frase_clave '%s' not found in word transcript — dropping", phrase[:50]
-                    )
-                    continue  # never guess — drop it
-                g["inicio_relativo"] = round(max(0.0, ts - seg_start), 2)
-                g["duracion"] = _FRASE_CLAVE_DURACION
+                    logger.debug("frase_clave '%s' not found — dropping", phrase[:50])
+                    continue
+                frase_pendiente = g  # timing assigned after rotulo is processed
+
+            elif g_tipo == "rotulo_persona":
+                if is_short:
+                    g["tipo"] = "rotulo_persona_simultaneo"
+                    g["inicio_relativo"] = 1.5
+                    g["duracion"] = max(0.5, seg_dur - 2.0)
+                else:
+                    g["inicio_relativo"] = 1.5
+                    g["duracion"] = 7.0   # name: 1.5s → 8.5s
+                kept.append(g)
+
             else:
                 key = (seg_tipo, g_tipo)
                 inicio, duracion = _TIMING_RULES.get(key, _DEFAULT_TIMING)
                 g["inicio_relativo"] = inicio
-                g["duracion"] = duracion
+                g["duracion"]        = duracion
+                kept.append(g)
 
-            kept.append(g)
+        if frase_pendiente is not None:
+            if is_short:
+                frase_pendiente["inicio_relativo"] = 1.5
+                frase_pendiente["duracion"] = max(0.5, seg_dur - 2.0)
+                kept.append(frase_pendiente)
+            else:
+                quote_out = min(seg_dur - 1.0, 14.0)
+                if quote_out > 9.5:
+                    frase_pendiente["inicio_relativo"] = 9.0
+                    frase_pendiente["duracion"] = max(0.5, quote_out - 9.0)
+                    kept.append(frase_pendiente)
+                else:
+                    logger.debug("Segment too short for sequential quote — dropping frase_clave")
 
         seg["grafismos"] = kept
 
@@ -288,6 +319,176 @@ def _assign_grafismo_timings(
         len(plan.get("segmentos", [])),
         sum(len(s.get("grafismos", [])) for s in plan.get("segmentos", [])),
     )
+
+
+# ---------------------------------------------------------------------------
+# Highlight quote extraction (Fix 3) — separate LLM call with strict criteria
+# ---------------------------------------------------------------------------
+
+_SYSTEM_HIGHLIGHT = (
+    "Eres un editor de titulares para un informativo de televisión española.\n"
+    "Tu única tarea es elegir UNA frase del texto que se te da.\n\n"
+    "CRITERIOS OBLIGATORIOS — rechaza cualquier frase que no cumpla TODOS:\n\n"
+    "  1. COMPLETA GRAMATICALMENTE\n"
+    "     La frase debe tener sujeto y verbo explícitos.\n"
+    "     MAL: \"y eso es lo que no hicieron\"  ← ¿quién? ¿qué?\n"
+    "     MAL: \"sabe lo que no hace\"  ← incompleta, sin contexto\n"
+    "     BIEN: \"Mazón reconoció que no activó el protocolo de emergencias\"\n\n"
+    "  2. AUTÓNOMA\n"
+    "     Un espectador que no ha visto nada antes debe entenderla sola.\n"
+    "     MAL: \"como le decía antes\"  ← referencia a algo no visto\n"
+    "     MAL: \"eso que usted menciona\"  ← sin referente claro\n"
+    "     BIEN: \"La Generalitat no envió alertas hasta las 20:11 del 29 de octubre\"\n\n"
+    "  3. NOTICIOSA\n"
+    "     Debe contener un hecho concreto, una cifra, un nombre, o una acción\n"
+    "     que sea el núcleo informativo del fragmento.\n"
+    "     MAL: \"esto es malo\"  ← vago\n"
+    "     BIEN: \"113 llamadas al 112 quedaron sin respuesta esa noche\"\n\n"
+    "  4. LONGITUD\n"
+    "     Mínimo 6 palabras. Máximo 12 palabras.\n"
+    "     Si no hay ninguna frase que cumpla 1-3 en el texto dado,\n"
+    "     devuelve null en el campo \"frase\".\n\n"
+    "  5. LITERAL\n"
+    "     Copia la frase exactamente como aparece en el texto.\n"
+    "     No la parafrasees ni la mejores.\n\n"
+    "Responde SOLO con este JSON sin texto adicional ni markdown:\n"
+    "{\n"
+    "  \"frase\": \"string o null\",\n"
+    "  \"segundo_inicio\": float,\n"
+    "  \"cumple_criterios\": true,\n"
+    "  \"razon\": \"string — en máx 10 palabras por qué esta frase es la mejor\"\n"
+    "}"
+)
+
+_USER_HIGHLIGHT = (
+    "Hablante: {nombre}, {cargo}.\n"
+    "Duración del segmento: {duracion:.1f} segundos.\n\n"
+    "Texto del segmento (con timestamps por palabra):\n"
+    "{texto_con_timestamps}\n\n"
+    "Elige la frase que cumpla todos los criterios del sistema.\n"
+    "El campo segundo_inicio debe ser el timestamp de la PRIMERA PALABRA\n"
+    "de la frase tal como aparece en el texto con timestamps."
+)
+
+
+def _format_words_with_timestamps(words: list[dict], seg_start: float, seg_end: float) -> str:
+    """Format word-level transcript for the highlight LLM prompt."""
+    scope = [w for w in words if w.get("start", 0) >= seg_start - 0.5 and w.get("start", 0) <= seg_end + 0.5]
+    return " ".join(f"[{w['start']:.1f}]{w['word']}" for w in scope)
+
+
+async def extract_highlight_quote(
+    nombre: str,
+    cargo: str,
+    duracion: float,
+    words: list[dict],
+    seg_start: float,
+    seg_end: float,
+) -> dict | None:
+    """Call LLM with strict criteria to select a citable quote from the segment.
+
+    Returns {"frase": str, "segundo_inicio": float} or None if no valid quote found.
+    Never raises — returns None on any failure.
+    """
+    texto_ts = _format_words_with_timestamps(words, seg_start, seg_end)
+    if not texto_ts.strip():
+        return None
+
+    user_msg = _USER_HIGHLIGHT.format(
+        nombre=nombre or "Declarante",
+        cargo=cargo or "",
+        duracion=duracion,
+        texto_con_timestamps=texto_ts,
+    )
+    try:
+        llm = get_llm_provider()
+        response = await llm.generate(
+            system=_SYSTEM_HIGHLIGHT,
+            messages=[{"role": "user", "content": user_msg}],
+            temperature=0.1,
+            max_tokens=300,
+        )
+        raw = response.text.strip()
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start == -1 or end == 0:
+            return None
+        data = json.loads(raw[start:end])
+        frase = data.get("frase")
+        if not frase or not data.get("cumple_criterios"):
+            return None
+        words_count = len(frase.split())
+        if words_count < 6:
+            logger.debug("Highlight quote too short (%d words) — rejected", words_count)
+            return None
+        if words_count > 12:
+            frase = " ".join(frase.split()[:12]) + "..."
+        segundo = float(data.get("segundo_inicio", 0.0))
+        if segundo == 0.0 and frase:
+            logger.warning("highlight quote has segundo_inicio=0, using t=2.0")
+            segundo = 2.0
+        return {"frase": frase, "segundo_inicio": segundo}
+    except Exception as exc:
+        logger.warning("extract_highlight_quote failed: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Key moments extraction (Fix 4) — newsworthy headline detection
+# ---------------------------------------------------------------------------
+
+_SYSTEM_KEY_MOMENTS = (
+    "Eres un editor jefe de informativos de televisión española.\n"
+    "Tu tarea es identificar los 3-5 momentos más noticiosos del vídeo\n"
+    "y convertir cada uno en un titular breve de TV.\n\n"
+    "REGLAS:\n"
+    "  1. Cada titular debe ser autónomo: se entiende sin ver el vídeo.\n"
+    "  2. Estilo TVE/Antena 3: directo, sin adornos, verbo en presente o pasado simple.\n"
+    "     MAL: \"El presidente habla sobre la polémica situación\"\n"
+    "     BIEN: \"Mazón admite que no llamó a Emergencias hasta las 20:00\"\n"
+    "  3. Máximo 10 palabras por titular.\n"
+    "  4. Incluye el segundo aproximado del vídeo donde ocurre ese momento.\n"
+    "  5. Clasifica cada momento: ADMISION | ACUSACION | CIFRA | COMPROMISO | CONTRADICCION\n"
+    "  6. Ordénalos por importancia periodística (el más importante primero).\n\n"
+    "Responde SOLO con este JSON sin markdown:\n"
+    "{\n"
+    "  \"titulares\": [\n"
+    "    {\n"
+    "      \"titular\": \"string — máx 10 palabras\",\n"
+    "      \"tipo\": \"ADMISION | ACUSACION | CIFRA | COMPROMISO | CONTRADICCION\",\n"
+    "      \"segundo_aproximado\": float,\n"
+    "      \"cita_literal\": \"string — frase exacta del texto que sustenta el titular\"\n"
+    "    }\n"
+    "  ],\n"
+    "  \"resumen_ejecutivo\": \"string — 2 frases que resumen el contenido completo\"\n"
+    "}"
+)
+
+
+async def extract_key_moments(transcripcion_completa: str) -> dict:
+    """Detect the 3-5 most newsworthy moments in the video and generate TV headlines.
+
+    Called once per video with the full transcription.
+    Returns {"titulares": [...], "resumen_ejecutivo": str}.
+    Never raises — returns empty result on failure.
+    """
+    if not transcripcion_completa.strip():
+        return {"titulares": [], "resumen_ejecutivo": ""}
+    try:
+        llm = get_llm_provider()
+        response = await llm.generate(
+            system=_SYSTEM_KEY_MOMENTS,
+            messages=[{"role": "user", "content": transcripcion_completa}],
+            temperature=0.2,
+            max_tokens=1200,
+        )
+        raw = response.text.strip()
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start == -1 or end == 0:
+            return {"titulares": [], "resumen_ejecutivo": ""}
+        return json.loads(raw[start:end])
+    except Exception as exc:
+        logger.warning("extract_key_moments failed: %s", exc)
+        return {"titulares": [], "resumen_ejecutivo": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -350,12 +551,56 @@ async def generar_timeline_narrativo(
     plan = _parse_plan(response.text.strip())
     _validate_plan(plan, len(fuentes), duracion_objetivo)
     _assign_grafismo_timings(plan, all_words)
+
+    # Improve frase_clave quotes in declaracion segments using strict criteria.
+    # Run all calls in parallel to avoid serial latency.
+    await _improve_highlight_quotes(plan, all_words)
+
     logger.info(
         "Narrative timeline generated: %d segments, locucion=%s",
         len(plan.get("segmentos", [])),
         plan.get("locucion") is not None,
     )
     return plan
+
+
+async def _improve_highlight_quotes(plan: dict, all_words: list[list[dict]] | None) -> None:
+    """Replace LLM-suggested frase_clave with validated quotes from extract_highlight_quote.
+
+    Runs all per-segment calls in parallel. Mutates plan in-place.
+    If a segment's frase_clave is rejected by the validator, it is dropped.
+    """
+    import asyncio as _asyncio
+
+    n_sources = len(all_words) if all_words else 0
+
+    async def _improve_segment(seg: dict) -> None:
+        if seg.get("tipo") != "declaracion":
+            return
+        grafismos = seg.get("grafismos", [])
+        frase_idx = next((i for i, g in enumerate(grafismos) if g.get("tipo") == "frase_clave"), None)
+        if frase_idx is None:
+            return
+
+        src_idx = int(seg.get("fuente_index", 0))
+        words = all_words[src_idx] if all_words and src_idx < n_sources else []
+        seg_start = float(seg.get("tiempo_inicio", 0.0))
+        seg_end   = float(seg.get("tiempo_fin", seg_start + 8.0))
+        seg_dur   = seg_end - seg_start
+
+        rotulo = next((g for g in grafismos if g.get("tipo") in ("rotulo_persona", "rotulo_persona_simultaneo")), {})
+        nombre = rotulo.get("texto_principal", "Declarante")
+        cargo  = rotulo.get("texto_secundario", "")
+
+        result = await extract_highlight_quote(nombre, cargo, seg_dur, words, seg_start, seg_end)
+        if result is None:
+            grafismos.pop(frase_idx)
+            logger.debug("extract_highlight_quote rejected quote for segment at %.1fs", seg_start)
+        else:
+            grafismos[frase_idx]["texto_principal"] = result["frase"]
+            logger.debug("extract_highlight_quote approved quote: '%s'", result["frase"][:60])
+
+    await _asyncio.gather(*[_improve_segment(s) for s in plan.get("segmentos", [])])
 
 
 # ---------------------------------------------------------------------------
