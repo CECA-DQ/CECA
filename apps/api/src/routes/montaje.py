@@ -268,7 +268,10 @@ async def ensamblar(
         # 3. Loop material if shorter than target
         material_en_loop = False
         duration = await _get_duration(out_path)
-        if duracion_objetivo and duration < duracion_objetivo - 0.5:
+        # Only loop when material is genuinely too short (< 85% of target).
+        # A small shortfall (editorial trim, budget enforcement) must NOT trigger
+        # a loop — that would repeat the opening clip at the end of the piece.
+        if duracion_objetivo and duration < duracion_objetivo * 0.85:
             looped = out_path.with_stem(out_path.stem + "_looped")
             await _loop_to_duration(out_path, float(duracion_objetivo), looped)
             out_path.unlink()

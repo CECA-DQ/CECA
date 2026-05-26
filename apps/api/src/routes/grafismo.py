@@ -262,7 +262,10 @@ def _render_frase_clave(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     box_h     = len(lines) * line_h + pad_v * 2
 
     box_x = _LEFT_SAFE
-    box_y = int(h * 0.52)  # center-lower — clear of lower thirds starting at h-168
+    # Anchor bottom of quote just above the rotulo_persona top, with 8px gap.
+    # rotulo top = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H = h - 168
+    frase_bottom = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H - 8
+    box_y = frase_bottom - box_h
 
     # Navy background
     draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NAVY_BOX)

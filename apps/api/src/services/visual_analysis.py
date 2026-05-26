@@ -88,7 +88,7 @@ async def analyze_video_visually(
     video_path: Path,
     ffmpeg: str,
     duration: float,
-    max_frames: int = 8,
+    max_frames: int | None = None,
 ) -> dict:
     """Extract frames and analyze with vision LLM.
 
@@ -97,6 +97,11 @@ async def analyze_video_visually(
     """
     if duration <= 0:
         return {"fotogramas": [], "personas_principales": []}
+
+    # One frame every ~5s gives enough resolution to detect speaker changes.
+    # Cap at 20 to keep the vision LLM call affordable.
+    if max_frames is None:
+        max_frames = min(max(8, int(duration / 5)), 20)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         frames = await _extract_frames(

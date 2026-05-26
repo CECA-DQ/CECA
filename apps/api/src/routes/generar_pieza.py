@@ -65,6 +65,30 @@ def _nearest_cut(cut_points: list[float], t: float, tolerance: float) -> float:
     return closest if abs(closest - t) <= tolerance else t
 
 
+def _deduplicate_segments(plan_segs: list[dict]) -> list[dict]:
+    """Remove segments with identical (fuente_index, tiempo_inicio, tiempo_fin).
+
+    The LLM occasionally repeats the same clip twice — once as intro and once
+    at the end — which makes the final video loop back visually.
+    """
+    seen: set[tuple] = set()
+    clean: list[dict] = []
+    for seg in plan_segs:
+        key = (
+            int(seg.get("fuente_index", 0)),
+            round(float(seg.get("tiempo_inicio", 0)), 1),
+            round(float(seg.get("tiempo_fin", 0)), 1),
+        )
+        if key not in seen:
+            seen.add(key)
+            clean.append(seg)
+        else:
+            logger.warning(
+                "Duplicate segment removed: fuente=%d t=[%.1f, %.1f]", *key
+            )
+    return clean
+
+
 def _snap_segment_boundaries(
     plan_segs: list[dict],
     all_segs_trans: list[list[dict]],
@@ -595,6 +619,10 @@ async def pieza_emision(
         pasos_completados.append("timeline_narrativo")
     except Exception as exc:
         logger.error("Narrative timeline failed, falling back to basic selection: %s", exc)
+
+    # Remove any duplicate segments before snapping and assembly
+    if plan_segmentos:
+        plan_segmentos = _deduplicate_segments(plan_segmentos)
 
     # Snap LLM timestamps to silence gaps in the audio for clean cuts
     if plan_segmentos:

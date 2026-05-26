@@ -241,14 +241,41 @@ def _find_phrase_timestamp(
     return best_time if best_ratio >= 0.55 else None
 
 
+def _find_speaker_at_time(
+    t: float,
+    analisis_visual: list[dict] | None,
+    src_idx: int,
+) -> dict | None:
+    """Return {nombre, cargo} of the person visible in the frame closest to time t.
+
+    Used as a fallback when the LLM plan has a declaracion segment but no
+    rotulo_persona (e.g. Mazón appears after Rufián but was not identified by
+    the narrative LLM from text alone).
+    """
+    if not analisis_visual or src_idx >= len(analisis_visual):
+        return None
+    frames = analisis_visual[src_idx].get("fotogramas", [])
+    if not frames:
+        return None
+    closest = min(frames, key=lambda f: abs(f.get("segundo", 0) - t))
+    personas = closest.get("personas", [])
+    for p in personas:
+        name = p.get("nombre", "").strip()
+        if name:
+            return {"nombre": name, "cargo": p.get("cargo", "")}
+    return None
+
+
 def _assign_grafismo_timings(
     plan: dict,
     all_words: list[list[dict]] | None,
+    analisis_visual: list[dict] | None = None,
 ) -> None:
     """Add inicio_relativo and duracion to every grafismo (mutates plan in-place).
 
     cintillo / rotulo / dato → deterministic table lookup.
     frase_clave              → word-level transcript search; dropped if not found.
+    declaracion sin rotulo   → fallback speaker lookup from visual analysis.
     """
     n_sources = len(all_words) if all_words else 0
 
@@ -280,6 +307,24 @@ def _assign_grafismo_timings(
                 g["duracion"] = duracion
 
             kept.append(g)
+
+        # Fallback: if this is a declaracion segment with no rotulo_persona,
+        # try to inject one from visual analysis (catches speaker changes the
+        # narrative LLM missed, e.g. Mazón replying after Rufián).
+        if seg_tipo == "declaracion" and not any(g.get("tipo") == "rotulo_persona" for g in kept):
+            speaker = _find_speaker_at_time(seg_start, analisis_visual, src_idx)
+            if speaker:
+                kept.insert(0, {
+                    "tipo": "rotulo_persona",
+                    "texto_principal": speaker["nombre"],
+                    "texto_secundario": speaker["cargo"],
+                    "inicio_relativo": 0.5,
+                    "duracion": 6.0,
+                })
+                logger.info(
+                    "Injected rotulo_persona '%s' for declaracion at %.1fs from visual analysis",
+                    speaker["nombre"], seg_start,
+                )
 
         seg["grafismos"] = kept
 
@@ -349,7 +394,7 @@ async def generar_timeline_narrativo(
 
     plan = _parse_plan(response.text.strip())
     _validate_plan(plan, len(fuentes), duracion_objetivo)
-    _assign_grafismo_timings(plan, all_words)
+    _assign_grafismo_timings(plan, all_words, analisis_visual)
     logger.info(
         "Narrative timeline generated: %d segments, locucion=%s",
         len(plan.get("segmentos", [])),
