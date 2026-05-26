@@ -21,12 +21,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     groq_api_key: str = ""
+    gemini_api_key: str = ""
     elevenlabs_api_key: str = ""
     voyage_api_key: str = ""
 
     # Adapter selection
-    llm_provider: str = "groq"            # groq | claude | openai
+    llm_provider: str = "groq"            # groq | claude | openai | gemini
     llm_default_model: str = "llama-3.3-70b-versatile"
+    visual_analysis_model: str = "gemini-2.0-flash"   # model used for frame scoring
     mam_provider: str = "mock"            # mock | avid
     storage_provider: str = "local"       # local | r2
     stt_provider: str = "groq_whisper"    # groq_whisper | whisper_api | mock

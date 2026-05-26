@@ -37,6 +37,28 @@ class LLMProvider(ABC):
         images: list[bytes],
     ) -> LLMResponse: ...
 
+    async def generate_with_interleaved_content(
+        self,
+        system: str,
+        content: list[dict],
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 4000,
+    ) -> LLMResponse:
+        """Send a prompt where text and images are interleaved.
+
+        content is a list of dicts with either:
+          {"type": "text",  "text": "..."}
+          {"type": "image", "data": bytes, "mime_type": "image/jpeg"}
+
+        Default implementation raises NotImplementedError.
+        Gemini adapter overrides this for frame-scoring use cases.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support interleaved content. "
+            "Use GeminiProvider for visual scoring."
+        )
+
     @abstractmethod
     async def stream(
         self,

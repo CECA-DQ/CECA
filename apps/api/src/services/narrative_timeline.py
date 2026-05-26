@@ -539,6 +539,62 @@ async def extract_key_moments(transcripcion_completa: str) -> dict:
 # Public function
 # ---------------------------------------------------------------------------
 
+def _scored_segments_to_plan(
+    scored_segments: list[dict],
+    cintillo_label: str,
+    titular: str,
+) -> dict:
+    """Convert select_segments() output to the standard plan dict format.
+
+    The LLM is NOT called when scored_segments are available — cuts come
+    from visual scoring, not text-only reasoning.
+    Grafismo text (speaker names from Gemini) is injected directly.
+    """
+    segs: list[dict] = []
+    n = len(scored_segments)
+
+    for i, s in enumerate(scored_segments):
+        if i == 0:
+            tipo = "intro"
+        elif i == n - 1:
+            tipo = "cierre"
+        else:
+            hablante = s.get("hablante", "plano_sala")
+            tipo = "declaracion" if hablante not in ("desconocido", "plano_sala", "") else "broll"
+
+        grafismos: list[dict] = []
+        if tipo in ("intro", "cierre"):
+            grafismos.append({
+                "tipo": "titular",
+                "texto_principal": f"{cintillo_label} — {titular[:50]}",
+                "texto_secundario": "",
+            })
+        elif tipo == "declaracion":
+            nombre = s.get("hablante", "")
+            cargo  = s.get("cargo", "")
+            if nombre and nombre not in ("desconocido", "plano_sala"):
+                grafismos.append({
+                    "tipo": "rotulo_persona",
+                    "texto_principal": nombre,
+                    "texto_secundario": cargo,
+                })
+
+        segs.append({
+            "orden": i + 1,
+            "fuente_index": s.get("fuente_index", 0),
+            "tiempo_inicio": round(s["t_start"], 2),
+            "tiempo_fin":    round(s["t_end"],   2),
+            "tipo": tipo,
+            "grafismos": grafismos,
+        })
+
+    return {
+        "titulo_cintillo": f"{cintillo_label} — {titular[:55]}",
+        "locucion": None,
+        "segmentos": segs,
+    }
+
+
 async def generar_timeline_narrativo(
     transcripciones: str,
     fuentes: list[str],
@@ -551,13 +607,53 @@ async def generar_timeline_narrativo(
     duracion_material: int | None = None,
     analisis_visual: list[dict] | None = None,
     all_words: list[list[dict]] | None = None,
+    scored_segments: list[dict] | None = None,
 ) -> dict:
-    """Call the LLM once and get back a full montage plan.
+    """Build a full montage plan.
 
-    The LLM returns segment selections and grafismo text only.
-    Grafismo timings are then assigned deterministically by _assign_grafismo_timings,
-    using word-level transcript data for frase_clave placement.
+    When scored_segments are provided (from visual frame scoring), cuts are
+    taken directly from them — the LLM only writes grafismo text and the
+    voiceover script. This is the TV-editor workflow: watch first, then cut.
+
+    Without scored_segments, the LLM selects cuts from text (legacy path).
     """
+    # ── Path A: visual-score-driven cuts ────────────────────────────────────
+    if scored_segments:
+        plan = _scored_segments_to_plan(scored_segments, cintillo_label, titular)
+
+        if requiere_locucion:
+            # Still ask the LLM for the voiceover script, but not for cuts
+            try:
+                locucion_prompt = (
+                    f"Escribe la locución (voz en off) para una pieza {tipo_pieza} de TV.\n"
+                    f"Titular: {titular}\n"
+                    f"Duración objetivo: {duracion_objetivo}s\n\n"
+                    f"Transcripción del material:\n{transcripciones}"
+                )
+                llm = get_llm_provider()
+                loc_resp = await llm.generate(
+                    system=(
+                        "Eres un redactor de informativos de televisión española. "
+                        "Escribe el texto de la locución completa en español. "
+                        "Solo el texto, sin JSON, sin titulares, sin aclaraciones."
+                    ),
+                    messages=[{"role": "user", "content": locucion_prompt}],
+                    temperature=0.3,
+                    max_tokens=1200,
+                )
+                plan["locucion"] = loc_resp.text.strip()
+            except Exception as exc:
+                logger.warning("Voiceover generation failed: %s", exc)
+
+        _assign_grafismo_timings(plan, all_words)
+        await _improve_highlight_quotes(plan, all_words)
+        logger.info(
+            "Timeline from visual scores: %d segments (no LLM cut selection)",
+            len(plan.get("segmentos", [])),
+        )
+        return plan
+
+    # ── Path B: LLM-driven cuts (fallback when no scored frames) ────────────
     duracion_mat = duracion_material or duracion_objetivo
     min_segs = max(3, duracion_objetivo // 15)
     max_segs = max(min_segs + 2, duracion_objetivo // 8)

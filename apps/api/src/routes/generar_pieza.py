@@ -29,6 +29,7 @@ from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
 from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, ensamblar
 from src.services.narrative_timeline import _format_visual_context, generar_timeline_narrativo
+from src.services.segment_selection import select_segments
 from src.services.visual_analysis import analyze_video_visually
 
 logger = logging.getLogger(__name__)
@@ -545,15 +546,21 @@ async def pieza_emision(
     # Get durations for visual analysis frame budgeting
     source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
 
-    all_trans_raw, all_visual = await asyncio.gather(
-        asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources]),
-        asyncio.gather(*[
-            analyze_video_visually(src, ffmpeg, dur)
-            for src, dur in zip(sources, source_durations)
-        ]),
-    )
-    all_segs_trans = [t[0] for t in all_trans_raw]
+    # Transcribe first so we can pass word timestamps to visual scoring
+    all_trans_raw = await asyncio.gather(*[_transcribe_source(src, ffmpeg) for src in sources])
+    all_segs_trans  = [t[0] for t in all_trans_raw]
     all_words_trans = [t[1] for t in all_trans_raw]
+
+    # Visual scoring: Gemini sees frames + transcript words together
+    all_visual = await asyncio.gather(*[
+        analyze_video_visually(
+            src, ffmpeg, dur,
+            words=all_words_trans[i],
+            tipo_contenido=body.tipo_pieza,
+            tema=body.titular.strip() or "",
+        )
+        for i, (src, dur) in enumerate(zip(sources, source_durations))
+    ])
 
     if all(not segs for segs in all_segs_trans):
         raise HTTPException(status_code=422, detail="Could not transcribe any source video")
@@ -596,7 +603,39 @@ async def pieza_emision(
             logger.warning("Auto-analysis for titular failed: %s", exc)
             titular = titular or "Sin título"
 
-    # ── PASO 2: Generar timeline narrativo (segmentos + grafismos en una llamada)
+    # ── PASO 2a: Selección de cortes por scoring visual (determinístico) ─────────
+    # If visual scoring returned high-quality frames, use the deterministic
+    # select_segments() algorithm. This mirrors how a TV editor works: watch
+    # first, then cut — no text-only LLM guessing what is on screen.
+    all_scored_frames = [v.get("frames", []) for v in all_visual]
+    scored_frames_flat = [
+        {**f, "fuente_index": i}
+        for i, frames in enumerate(all_scored_frames)
+        for f in frames
+        if f.get("puntuacion", 0) >= 5
+    ]
+
+    score_selected: list[dict] = []
+    if scored_frames_flat:
+        # Flatten words across sources for silence snapping
+        words_flat = [w for ws in all_words_trans for w in ws]
+        score_selected = select_segments(
+            scored_frames_flat,
+            target_duration=float(duracion_efectiva),
+            words=words_flat,
+        )
+        if score_selected:
+            pasos_completados.append("seleccion_visual")
+            logger.info(
+                "Visual scoring selected %d segments (%.1fs)",
+                len(score_selected),
+                sum(s["t_end"] - s["t_start"] for s in score_selected),
+            )
+
+    # ── PASO 2b: Generar timeline narrativo (grafismos + locucion) ────────────
+    # The LLM no longer decides cuts — it only assigns grafismo text and writes
+    # the voiceover script. If visual scoring produced segments, we inject them
+    # into the plan; otherwise the LLM selects cuts as a fallback.
     plan: dict = {}
     plan_segmentos: list[dict] = []
     locucion_text: str | None = None
@@ -613,6 +652,7 @@ async def pieza_emision(
             duracion_material=int(max_available),
             analisis_visual=list(all_visual),
             all_words=all_words_trans,
+            scored_segments=score_selected or None,
         )
         plan_segmentos = plan.get("segmentos", [])
         locucion_text = plan.get("locucion")
