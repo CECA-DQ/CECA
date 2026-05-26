@@ -85,9 +85,11 @@ async def _normalizar_clip(source: Path, t_start: float, t_end: float | None, ou
         f"scale={_W}:{_H}:force_original_aspect_ratio=decrease,"
         f"pad={_W}:{_H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
     )
+    # Use -t (duration) not -to (end time): more reliable with fast seek because
+    # keyframe alignment can leave a short audio tail with -to.
     cmd = [_ffmpeg(), "-y", "-ss", str(t_start)]
     if t_end is not None:
-        cmd += ["-to", str(t_end)]
+        cmd += ["-t", str(round(t_end - t_start, 3))]
     cmd += [
         "-i", str(source),
         "-vf", vf,
@@ -271,7 +273,7 @@ async def ensamblar(
         # Only loop when material is genuinely too short (< 85% of target).
         # A small shortfall (editorial trim, budget enforcement) must NOT trigger
         # a loop — that would repeat the opening clip at the end of the piece.
-        if duracion_objetivo and duration < duracion_objetivo * 0.85:
+        if duracion_objetivo and duration < duracion_objetivo * 0.40:
             looped = out_path.with_stem(out_path.stem + "_looped")
             await _loop_to_duration(out_path, float(duracion_objetivo), looped)
             out_path.unlink()

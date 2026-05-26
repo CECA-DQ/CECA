@@ -13,6 +13,7 @@ Architecture:
 import asyncio
 import json
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -71,9 +72,9 @@ async def _extract_frames(
     out_pattern = str(tmpdir / "f_%04d.jpg")
     cmd = [
         ffmpeg, "-y", "-i", str(video_path),
-        "-vf", f"fps=1/{interval:.2f},scale=640:360",
+        "-vf", f"fps=1/{interval:.2f},scale=320:180",   # smaller = fewer tokens
         "-frames:v", str(n_frames),
-        "-q:v", "4",
+        "-q:v", "5",
         out_pattern,
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -118,9 +119,9 @@ async def analyze_video_visually(
         logger.warning("GEMINI_API_KEY not set — visual analysis unavailable")
         return {"frames": [], "fotogramas": [], "personas_principales": []}
 
-    interval = 5.0
+    interval = 5.0   # one frame every 5s — catches speaker changes within a shot
     if max_frames is None:
-        max_frames = min(max(6, int(duration / interval)), 24)
+        max_frames = min(max(4, int(duration / interval)), 16)  # cap at 16 frames
 
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_frames = await _extract_frames(
@@ -155,12 +156,28 @@ async def analyze_video_visually(
 
     try:
         provider = get_visual_analysis_provider()
-        response = await provider.generate_with_interleaved_content(
-            system=_SYSTEM,
-            content=content,
-            temperature=0.1,
-            max_tokens=4000,
-        )
+
+        # Retry once on 429 — parse the retry delay from the error message
+        for attempt in range(2):
+            try:
+                response = await provider.generate_with_interleaved_content(
+                    system=_SYSTEM,
+                    content=content,
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
+                break
+            except Exception as exc:
+                msg = str(exc)
+                if "429" in msg and attempt == 0:
+                    wait = 60.0
+                    m = re.search(r"retryDelay.*?(\d+)s", msg)
+                    if m:
+                        wait = min(float(m.group(1)) + 5, 120)
+                    logger.warning("Gemini 429 — waiting %.0fs before retry", wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
         raw = response.text.strip()
         start, end = raw.find("{"), raw.rfind("}") + 1
         if start == -1 or end == 0:

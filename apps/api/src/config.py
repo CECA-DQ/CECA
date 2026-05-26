@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Adapter selection
     llm_provider: str = "groq"            # groq | claude | openai | gemini
     llm_default_model: str = "llama-3.3-70b-versatile"
-    visual_analysis_model: str = "gemini-2.0-flash"   # model used for frame scoring
+    visual_analysis_model: str = "gemini-2.5-flash"   # model used for frame scoring
     mam_provider: str = "mock"            # mock | avid
     storage_provider: str = "local"       # local | r2
     stt_provider: str = "groq_whisper"    # groq_whisper | whisper_api | mock

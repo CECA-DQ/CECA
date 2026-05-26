@@ -66,6 +66,8 @@ class ClaudeProvider(LLMProvider):
                 existing
                 if isinstance(existing, list)
                 else [{"type": "text", "text": existing}]
+
+                
             )
             augmented[-1] = {"role": "user", "content": text_block + image_blocks}
         else:

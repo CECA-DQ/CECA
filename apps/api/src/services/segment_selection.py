@@ -55,6 +55,7 @@ def select_segments(
     words: list[dict] | None = None,
     min_segment_s: float = 5.0,
     max_segment_s: float = 12.0,
+    tipo_pieza: str = "vtr",
 ) -> list[dict]:
     """Select the best segments from journalistic-scored frames.
 
@@ -73,49 +74,74 @@ def select_segments(
 
     silences = _find_silences(words or [])
 
+    # Broll/cola pieces have no speaker requirement — lower the score threshold
+    # so visually interesting shots (score 2-4) are included.
+    _BROLL_TYPES = {"cola", "broll", "off", "promo", "teaser"}
+    min_score = 2 if tipo_pieza in _BROLL_TYPES else _MIN_SCORE
+
     # Step A — filter dead moments
-    candidates = [f for f in scored_frames if f.get("puntuacion", 0) >= _MIN_SCORE]
+    candidates = [f for f in scored_frames if f.get("puntuacion", 0) >= min_score]
     if not candidates:
-        logger.warning("No frames scored >= %d — using top-5 fallback", _MIN_SCORE)
-        candidates = sorted(scored_frames, key=lambda f: f.get("puntuacion", 0), reverse=True)[:5]
+        logger.warning("No frames scored >= %d — using top fallback", min_score)
+        # Pick enough frames to cover target_duration without looping
+        n_fallback = max(5, int(target_duration / max_segment_s) + 2)
+        candidates = sorted(scored_frames, key=lambda f: f.get("puntuacion", 0), reverse=True)[:n_fallback]
 
-    # Step B — merge consecutive frames into segments
+    # Step B — build candidate segments
     segments: list[dict] = []
-    current: dict | None = None
 
-    for frame in sorted(candidates, key=lambda f: f["timestamp_s"]):
-        ts = frame["timestamp_s"]
-        score = frame.get("puntuacion", 0)
-
-        if current is None:
-            current = {
-                "t_start":   max(0.0, ts - 3.0),
-                "t_end":     ts + 8.0,
-                "max_score": score,
-                "hablante":  frame.get("hablante", "desconocido"),
+    if tipo_pieza in _BROLL_TYPES:
+        # B-roll/cola: one independent clip per frame, no merging.
+        # Frames are sampled every 5s so merging them collapses the whole video
+        # into a single 12s segment. Instead, give step D many short clips to
+        # choose from so it can fill the target duration from diverse moments.
+        clip_s = min(max_segment_s, 8.0)
+        for frame in sorted(candidates, key=lambda f: f["timestamp_s"]):
+            ts = frame["timestamp_s"]
+            segments.append({
+                "t_start":   max(0.0, ts - 1.5),
+                "t_end":     ts + clip_s - 1.5,
+                "max_score": frame.get("puntuacion", 0),
+                "hablante":  frame.get("hablante", "plano_sala"),
                 "cargo":     frame.get("cargo_inferido") or "",
                 "razon":     frame.get("razon_puntuacion", ""),
-            }
-        elif ts - current["t_end"] < _MERGE_GAP_S:
-            current["t_end"] = ts + 8.0
-            if score > current["max_score"]:
-                current["max_score"] = score
-                current["hablante"]  = frame.get("hablante", current["hablante"])
-                current["cargo"]     = frame.get("cargo_inferido") or current["cargo"]
-                current["razon"]     = frame.get("razon_puntuacion", current["razon"])
-        else:
+            })
+    else:
+        # Declaracion types: merge nearby frames into a single soundbite window
+        current: dict | None = None
+        for frame in sorted(candidates, key=lambda f: f["timestamp_s"]):
+            ts = frame["timestamp_s"]
+            score = frame.get("puntuacion", 0)
+
+            if current is None:
+                current = {
+                    "t_start":   max(0.0, ts - 3.0),
+                    "t_end":     ts + 8.0,
+                    "max_score": score,
+                    "hablante":  frame.get("hablante", "desconocido"),
+                    "cargo":     frame.get("cargo_inferido") or "",
+                    "razon":     frame.get("razon_puntuacion", ""),
+                }
+            elif ts - current["t_end"] < _MERGE_GAP_S:
+                current["t_end"] = ts + 8.0
+                if score > current["max_score"]:
+                    current["max_score"] = score
+                    current["hablante"]  = frame.get("hablante", current["hablante"])
+                    current["cargo"]     = frame.get("cargo_inferido") or current["cargo"]
+                    current["razon"]     = frame.get("razon_puntuacion", current["razon"])
+            else:
+                segments.append(current)
+                current = {
+                    "t_start":   max(0.0, ts - 3.0),
+                    "t_end":     ts + 8.0,
+                    "max_score": score,
+                    "hablante":  frame.get("hablante", "desconocido"),
+                    "cargo":     frame.get("cargo_inferido") or "",
+                    "razon":     frame.get("razon_puntuacion", ""),
+                }
+
+        if current:
             segments.append(current)
-            current = {
-                "t_start":   max(0.0, ts - 3.0),
-                "t_end":     ts + 8.0,
-                "max_score": score,
-                "hablante":  frame.get("hablante", "desconocido"),
-                "cargo":     frame.get("cargo_inferido") or "",
-                "razon":     frame.get("razon_puntuacion", ""),
-            }
-
-    if current:
-        segments.append(current)
 
     # Step C — snap boundaries to silence gaps
     for seg in segments:

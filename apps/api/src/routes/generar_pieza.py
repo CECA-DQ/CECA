@@ -353,8 +353,10 @@ async def _select_segments_llm(
 
 async def _synthesize_locucion(text: str, voz_id: str) -> str:
     from src.adapters.tts.factory import get_tts_provider
+    from src.config import settings as _settings
     tts = get_tts_provider()
-    result = await tts.synthesize(text=text, voice_id=voz_id, language="es")
+    resolved_voice = voz_id if voz_id and voz_id != "default" else _settings.tts_default_voice_id
+    result = await tts.synthesize(text=text, voice_id=resolved_voice, language="es")
     audio_key = f"output/locucion/{uuid4()}.mp3"
     audio_path = (_STORAGE_BASE / audio_key).resolve()
     audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,11 +610,13 @@ async def pieza_emision(
     # select_segments() algorithm. This mirrors how a TV editor works: watch
     # first, then cut — no text-only LLM guessing what is on screen.
     all_scored_frames = [v.get("frames", []) for v in all_visual]
+    # Pass all frames — no pre-filter here. select_segments() applies its own
+    # threshold internally and has a fallback for broll/cola pieces with no
+    # high-scoring speaker frames.
     scored_frames_flat = [
         {**f, "fuente_index": i}
         for i, frames in enumerate(all_scored_frames)
         for f in frames
-        if f.get("puntuacion", 0) >= 5
     ]
 
     score_selected: list[dict] = []
@@ -623,6 +627,7 @@ async def pieza_emision(
             scored_frames_flat,
             target_duration=float(duracion_efectiva),
             words=words_flat,
+            tipo_pieza=body.tipo_pieza,
         )
         if score_selected:
             pasos_completados.append("seleccion_visual")
