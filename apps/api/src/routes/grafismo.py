@@ -46,6 +46,7 @@ _BOTTOM_MARGIN = 60
 _CINTILLO_BAND_H  = 90    # height of the full-width bottom strip
 _ROTULO_BOX_H     = 68    # height of the name/role box
 _ROTULO_GAP       = 10    # clear space between rotulo bottom and cintillo top
+_COMBINED_ROTULO_EXTRA = 70  # extra vertical lift for name in simultaneous mode
 # rotulo top = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H
 # = h - 90 - 10 - 68 = h - 168
 
@@ -62,6 +63,37 @@ _FONT_REGULAR_CANDIDATES = [
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
+
+
+def get_overlay_timing(segment_duration: float, t_offset: float = 0.0) -> dict:
+    """Return relative inicio/fin values for name, quote, and cintillo overlays.
+
+    t_offset: cumulative start of this segment in the final video.
+    For in-segment (inicio_relativo) use, call with t_offset=0.
+    """
+    name_in  = t_offset + 1.5
+    name_out = t_offset + 8.5
+
+    if segment_duration >= 14:
+        quote_in  = t_offset + 9.0
+        quote_out = t_offset + min(segment_duration - 1.0, 14.0)
+    else:
+        # Short segment: name and quote shown simultaneously
+        name_in   = t_offset + 1.5
+        name_out  = t_offset + max(t_offset + 2.0, segment_duration - 0.5)
+        quote_in  = name_in
+        quote_out = name_out
+
+    return {
+        "name_in":        name_in,
+        "name_out":       name_out,
+        "quote_in":       quote_in,
+        "quote_out":      quote_out,
+        "name_enable":    f"between(t,{name_in:.2f},{name_out:.2f})",
+        "role_enable":    f"between(t,{name_in:.2f},{name_out:.2f})",
+        "quote_enable":   f"between(t,{quote_in:.2f},{quote_out:.2f})",
+        "cintillo_enable": "1",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -193,16 +225,53 @@ def _render_lower_third(el: GrafismoElemento, w: int, h: int) -> Image.Image:
 
     # Navy background
     draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NAVY_BOX)
-
     # Orange accent line across the TOP of the box
     draw.rectangle([box_x, box_y, box_x + box_w, box_y + 3], fill=_NARANJA)
-
     # Name
     draw.text((box_x + 16, box_y + 8), nombre, font=f_nombre, fill=_BLANCO)
-
     # Role / cargo in orange
     if cargo:
         draw.text((box_x + 16, box_y + 40), cargo, font=f_cargo, fill=_NARANJA)
+
+    return img
+
+
+def _render_lower_third_simultaneo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    """Name+role raised _COMBINED_ROTULO_EXTRA pixels to make room for quote below.
+
+    Used when both rotulo_persona and frase_clave are shown at the same time
+    (short segments < 14s). Text-only with drop shadow (no navy box) so the
+    combined block doesn't feel too heavy.
+    """
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    nombre = el.texto_principal.strip()[:42]
+    cargo  = el.texto_secundario.strip()[:58] if el.texto_secundario else ""
+
+    f_nombre = _load_font(26, bold=True)
+    f_cargo  = _load_font(16, bold=False)
+
+    # Raise box above standard rotulo zone to clear the quote block
+    base_y = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H - _COMBINED_ROTULO_EXTRA
+
+    # Drop shadow + white name text
+    draw.text((_LEFT_SAFE + 2, base_y + 2), nombre, font=f_nombre, fill=(0, 0, 0, 180))
+    draw.text((_LEFT_SAFE,     base_y),     nombre, font=f_nombre, fill=_BLANCO)
+
+    # Role in #CCCCCC below name
+    if cargo:
+        role_y = base_y + 32
+        draw.text((_LEFT_SAFE + 1, role_y + 1), cargo, font=f_cargo, fill=(0, 0, 0, 140))
+        draw.text((_LEFT_SAFE,     role_y),     cargo, font=f_cargo, fill=(204, 204, 204, 255))
+
+    # Orange separator line (width = name text width)
+    sep_y = base_y + 56
+    try:
+        name_w = f_nombre.getbbox(nombre)[2] - f_nombre.getbbox(nombre)[0]
+    except Exception:
+        name_w = len(nombre) * 14
+    draw.rectangle([_LEFT_SAFE, sep_y, _LEFT_SAFE + name_w, sep_y + 2], fill=_NARANJA)
 
     return img
 
@@ -241,39 +310,39 @@ def _render_dato(el: GrafismoElemento, w: int, h: int) -> Image.Image:
 
 
 def _render_frase_clave(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    """Quote card: navy box in the center-lower zone, above the lower thirds.
+    """Quote card at the standard lower-third zone (h-168).
 
-    Positioned at ~52% of frame height so it never clashes with cintillo
-    (bottom 90px) or rotulo_persona (h-168 to h-100).
+    Sequential mode: appears at the same h-168 position as the name, but at
+    a later time (name shows 1.5-8.5s, quote shows 9.0s+).
+    Simultaneous mode: appears at h-168 while the name is raised to h-238.
+    Either way the quote never overlaps with the cintillo band.
     """
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    texto = el.texto_principal.strip()
-    f_quote = _load_font(30, bold=True)
+    texto   = el.texto_principal.strip()
+    f_quote = _load_font(19, bold=True)   # 19px semibold per spec
 
-    box_w = int(w * 0.60)
-    lines = _wrap_text(texto, f_quote, box_w - 50)  # 50px for bar + padding
+    bar_w  = 3    # left orange border (spec: 3px solid #FF6600)
+    pad_h  = 14   # horizontal padding
+    pad_v  = 5    # vertical padding
+    line_h = 26
 
-    line_h    = 38
-    pad_v     = 16
-    pad_h     = 18
-    bar_w     = 5
-    box_h     = len(lines) * line_h + pad_v * 2
+    max_w = min(int(w * 0.60), 860)
+    lines = _wrap_text(texto, f_quote, max_w - bar_w - pad_h * 2)[:2]  # max 2 lines
+    box_h = len(lines) * line_h + pad_v * 2
 
+    # Align with the top of the standard rotulo zone
     box_x = _LEFT_SAFE
-    # Anchor bottom of quote just above the rotulo_persona top, with 8px gap.
-    # rotulo top = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H = h - 168
-    frase_bottom = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H - 8
-    box_y = frase_bottom - box_h
+    box_y = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H   # h - 168
 
-    # Navy background
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NAVY_BOX)
+    # Semi-transparent dark background only behind text (rgba 0,0,0,0.68 → alpha 173)
+    draw.rectangle([box_x, box_y, box_x + max_w, box_y + box_h], fill=(0, 0, 0, 173))
 
-    # Orange left accent bar
+    # Orange left border
     draw.rectangle([box_x, box_y, box_x + bar_w, box_y + box_h], fill=_NARANJA)
 
-    # Quote lines
+    # Quote text
     for i, line in enumerate(lines):
         draw.text(
             (box_x + bar_w + pad_h, box_y + pad_v + i * line_h),
@@ -325,6 +394,8 @@ def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
         return _render_cintillo(el, w, h)
     if el.tipo == "rotulo_persona":
         return _render_lower_third(el, w, h)
+    if el.tipo == "rotulo_persona_simultaneo":
+        return _render_lower_third_simultaneo(el, w, h)
     if el.tipo == "dato":
         return _render_dato(el, w, h)
     if el.tipo == "pie_pagina":
