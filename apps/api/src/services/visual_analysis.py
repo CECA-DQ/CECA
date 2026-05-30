@@ -100,11 +100,12 @@ async def _extract_frames_at(
     """Extract one JPEG per requested timestamp (content-driven sampling).
 
     Higher default resolution than the grid path so documents / expressions /
-    on-screen text are legible to the scorer. A failed single extraction is
-    skipped, not fatal.
+    on-screen text are legible to the scorer. Extractions run concurrently; a
+    failed or empty extraction is skipped, not fatal. Output files are prefixed
+    c_NNNN to avoid collision with the f_NNNN grid frames. Results are returned
+    in input-timestamp order.
     """
-    frames: list[tuple[float, bytes]] = []
-    for i, ts in enumerate(timestamps):
+    async def _extract_one(i: int, ts: float) -> Path:
         out = tmpdir / f"c_{i:04d}.jpg"
         cmd = [
             ffmpeg, "-y", "-ss", f"{max(0.0, ts):.2f}", "-i", str(video_path),
@@ -116,7 +117,12 @@ async def _extract_frames_at(
             stderr=asyncio.subprocess.DEVNULL,
         )
         await proc.communicate()
-        if out.exists():
+        return out
+
+    outs = await asyncio.gather(*[_extract_one(i, ts) for i, ts in enumerate(timestamps)])
+    frames: list[tuple[float, bytes]] = []
+    for ts, out in zip(timestamps, outs):
+        if out.exists() and out.stat().st_size > 0:
             frames.append((round(ts, 1), out.read_bytes()))
     return frames
 
