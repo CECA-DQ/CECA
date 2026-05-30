@@ -28,6 +28,7 @@ from src.routes.archivo import (
 from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
 from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, ensamblar
+from src.services.candidate_moments import find_candidate_moments
 from src.services.narrative_timeline import _format_visual_context, generar_timeline_narrativo
 from src.services.segment_selection import select_segments
 from src.services.visual_analysis import analyze_video_visually
@@ -566,6 +567,15 @@ async def pieza_emision(
     all_segs_trans  = [t[0] for t in all_trans_raw]
     all_words_trans = [t[1] for t in all_trans_raw]
 
+    # Content-driven sampling: pick the moments worth scoring from the transcript
+    all_candidates = [
+        find_candidate_moments(
+            all_words_trans[i], all_segs_trans[i], dur,
+            tema=body.titular.strip() or "", budget=25,
+        )
+        for i, (src, dur) in enumerate(zip(sources, source_durations))
+    ]
+
     # Visual scoring: Gemini sees frames + transcript words together
     all_visual = await asyncio.gather(*[
         analyze_video_visually(
@@ -573,6 +583,7 @@ async def pieza_emision(
             words=all_words_trans[i],
             tipo_contenido=body.tipo_pieza,
             tema=body.titular.strip() or "",
+            candidate_moments=all_candidates[i] or None,
         )
         for i, (src, dur) in enumerate(zip(sources, source_durations))
     ])
