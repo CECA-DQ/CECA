@@ -12,9 +12,13 @@ logger = logging.getLogger(__name__)
 
 _SILENCE_GAP_S = 0.45          # gap (s) that ends a sentence unit
 _SENT_END = (".", "?", "!")
+_NUM_RE = re.compile(r"\d")
+_MIN_WORDS = 4
+_MAX_WORDS = 60
 
 
 def _finalize_unit(chunk: list[dict], bounded_by_pause: bool) -> dict:
+    """Collapse a word chunk into a unit dict."""
     t_start = chunk[0]["start"]
     t_end = chunk[-1].get("end", chunk[-1]["start"])
     text = " ".join(w.get("word", "").strip() for w in chunk).strip()
@@ -25,6 +29,23 @@ def _finalize_unit(chunk: list[dict], bounded_by_pause: bool) -> dict:
         "timestamp": round((t_start + t_end) / 2, 1),
         "bounded_by_pause": bounded_by_pause,
     }
+
+
+def _score_unit(unit: dict, tema_keywords: list[str]) -> float:
+    """Cheap journalistic-value heuristic. Higher = more worth scoring visually."""
+    text = unit["text"]
+    n_words = len(text.split())
+    score = 0.0
+    if _NUM_RE.search(text):
+        score += 2.0
+    if tema_keywords:
+        low = text.lower()
+        score += float(sum(1 for k in tema_keywords if k in low))
+    if _MIN_WORDS <= n_words <= _MAX_WORDS:
+        score += 1.0
+    if unit.get("bounded_by_pause"):
+        score += 1.0
+    return score
 
 
 def _build_units(words: list[dict]) -> list[dict]:

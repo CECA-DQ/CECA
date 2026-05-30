@@ -20,3 +20,27 @@ def test_build_units_splits_on_silence_gap():
     units = _build_units(words)
     assert len(units) == 2
     assert units[0]["bounded_by_pause"] is True
+
+
+from src.services.candidate_moments import _score_unit
+
+
+def _unit(text, bounded_by_pause=False):
+    return {"text": text, "bounded_by_pause": bounded_by_pause,
+            "t_start": 0.0, "t_end": 1.0, "timestamp": 0.5}
+
+
+def test_score_rewards_numbers():
+    with_num = _score_unit(_unit("inversión de 2000 millones de euros este año"), [])
+    without = _score_unit(_unit("vamos a hablar de varias cosas importantes hoy"), [])
+    assert with_num > without
+
+
+def test_score_rewards_tema_keywords():
+    s = _score_unit(_unit("el plan ferroviario nacional avanza con fuerza"), ["ferroviario"])
+    base = _score_unit(_unit("el plan nacional avanza con mucha fuerza"), ["ferroviario"])
+    assert s > base
+
+
+def test_build_units_empty_returns_empty():
+    assert _build_units([]) == []
