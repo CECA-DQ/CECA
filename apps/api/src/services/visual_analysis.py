@@ -195,9 +195,7 @@ async def analyze_video_visually(
     })
 
     for i, (ts, img_bytes) in enumerate(raw_frames):
-        transcript_text = cand_text.get(ts) if cand_text else _get_transcript_window(words or [], ts)
-        if transcript_text is None:
-            transcript_text = _get_transcript_window(words or [], ts)
+        transcript_text = (cand_text.get(ts) or _get_transcript_window(words or [], ts)) if cand_text else _get_transcript_window(words or [], ts)
         content.append({
             "type": "text",
             "text": (
@@ -243,20 +241,22 @@ async def analyze_video_visually(
 
         # Map each scored frame back to the timestamp of the frame we actually
         # sent, by frame_id — robust to the model dropping/reordering frames.
+        # The model legitimately returns fewer frames than sent (it skips
+        # low-value ones), so a smaller count is expected, not an error.
         ts_by_id = {i: raw_frames[i][0] for i in range(len(raw_frames))}
         aligned: list[dict] = []
+        seen_ids: set[int] = set()
         for frame in scored:
             fid = frame.get("frame_id")
-            if isinstance(fid, int) and fid in ts_by_id:
+            if isinstance(fid, int) and fid in ts_by_id and fid not in seen_ids:
                 frame["timestamp_s"] = ts_by_id[fid]
                 aligned.append(frame)
+                seen_ids.add(fid)
             else:
-                logger.warning("Dropping frame with unmappable frame_id=%r", fid)
+                logger.debug("Skipping frame with unmappable/duplicate frame_id=%r", fid)
         scored = aligned
         if len(scored) != len(raw_frames):
-            logger.warning(
-                "Frame count mismatch: sent %d, mapped %d", len(raw_frames), len(scored)
-            )
+            logger.debug("Scored %d of %d sent frames", len(scored), len(raw_frames))
 
         # Build personas_principales from high-confidence identifications
         known: dict[str, dict] = {}
