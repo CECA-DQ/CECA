@@ -90,6 +90,37 @@ async def _extract_frames(
     return frames
 
 
+async def _extract_frames_at(
+    video_path: Path,
+    ffmpeg: str,
+    tmpdir: Path,
+    timestamps: list[float],
+    scale: str = "512:288",
+) -> list[tuple[float, bytes]]:
+    """Extract one JPEG per requested timestamp (content-driven sampling).
+
+    Higher default resolution than the grid path so documents / expressions /
+    on-screen text are legible to the scorer. A failed single extraction is
+    skipped, not fatal.
+    """
+    frames: list[tuple[float, bytes]] = []
+    for i, ts in enumerate(timestamps):
+        out = tmpdir / f"c_{i:04d}.jpg"
+        cmd = [
+            ffmpeg, "-y", "-ss", f"{max(0.0, ts):.2f}", "-i", str(video_path),
+            "-frames:v", "1", "-vf", f"scale={scale}", "-q:v", "4", str(out),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if out.exists():
+            frames.append((round(ts, 1), out.read_bytes()))
+    return frames
+
+
 def _get_transcript_window(words: list[dict], t: float, half: float = 3.0) -> str:
     """Return the transcript text in the ±half second window around t."""
     window = [w["word"] for w in words if abs(w.get("start", 0) - t) <= half]
