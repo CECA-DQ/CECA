@@ -46,7 +46,10 @@ def _words_two_sentences():
 
 
 def test_nota_uses_sentence_aligned_cuts():
-    frames = [{"timestamp_s": 1.0, "puntuacion": 8, "hablante": "Sánchez"}]
+    # ts=3.0 is mid-sentence: a fixed window would start at 1.5 (3.0-1.5),
+    # the sentence-aligned path starts at the enclosing sentence start (0.0).
+    # Asserting 0.0 therefore proves the sentence path is taken.
+    frames = [{"timestamp_s": 3.0, "puntuacion": 8, "hablante": "Sánchez"}]
     out = select_segments(frames, target_duration=60.0, words=_words_two_sentences(),
                           tipo_pieza="nota")
     assert out, "expected at least one segment"
