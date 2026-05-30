@@ -244,7 +244,11 @@ async def ensamblar(
     normalize_audio: bool = True,
     mute_clips: bool = False,
 ) -> tuple[str, float, bool]:
-    """Assemble clips and return (video_key, duration_seconds, material_en_loop)."""
+    """Assemble clips and return (video_key, duration_seconds, material_en_loop).
+
+    mute_clips applies to ALL clips uniformly (no partial muting) and is mutually
+    exclusive with audio_voiceover_key.
+    """
     if not segmentos:
         raise HTTPException(status_code=422, detail="At least one segment is required")
 
@@ -295,8 +299,9 @@ async def ensamblar(
             material_en_loop = True
             duration = await _get_duration(out_path)
 
-        # 4. Mix voiceover if provided
-        if audio_voiceover_key:
+        # 4. Mix voiceover if provided (skip for muted clips — they have no audio
+        #    stream to mix into; mute_clips and a voiceover are mutually exclusive).
+        if audio_voiceover_key and not mute_clips:
             audio_path = (_STORAGE_BASE / audio_voiceover_key).resolve()
             if audio_path.exists():
                 mixed = out_path.with_stem(out_path.stem + "_mixed")
