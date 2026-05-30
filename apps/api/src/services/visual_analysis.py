@@ -141,6 +141,7 @@ async def analyze_video_visually(
     tipo_contenido: str = "informativo",
     tema: str = "",
     max_frames: int | None = None,
+    candidate_moments: list[dict] | None = None,
 ) -> dict:
     """Extract frames and score them for journalistic value using Gemini Vision.
 
@@ -156,20 +157,27 @@ async def analyze_video_visually(
         logger.warning("GEMINI_API_KEY not set — visual analysis unavailable")
         return {"frames": [], "fotogramas": [], "personas_principales": []}
 
-    if max_frames is None:
-        # Cap at 12: Gemini 2.5 Flash uses internal reasoning tokens that eat into
-        # the output budget, so 12 frames × ~300 tokens/frame + overhead fits in 8000.
-        max_frames = min(max(4, int(duration / 5.0)), 12)
-    # Spread frames evenly across the full video duration.
-    # For short videos (≤60s) this keeps the natural 5s cadence.
-    # For long videos (e.g. 24min) this samples one frame every ~120s
-    # instead of only covering the opening 60 seconds.
-    interval = max(5.0, duration / max_frames)
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        raw_frames = await _extract_frames(
-            video_path, ffmpeg, Path(tmpdir), interval, max_frames
-        )
+        if candidate_moments:
+            timestamps = [c["timestamp"] for c in candidate_moments]
+            raw_frames = await _extract_frames_at(
+                video_path, ffmpeg, Path(tmpdir), timestamps
+            )
+            cand_text = {round(c["timestamp"], 1): c.get("text", "") for c in candidate_moments}
+        else:
+            if max_frames is None:
+                # Cap at 12: Gemini 2.5 Flash uses internal reasoning tokens that eat into
+                # the output budget, so 12 frames × ~300 tokens/frame + overhead fits in 8000.
+                max_frames = min(max(4, int(duration / 5.0)), 12)
+            # Spread frames evenly across the full video duration.
+            # For short videos (≤60s) this keeps the natural 5s cadence.
+            # For long videos (e.g. 24min) this samples one frame every ~120s
+            # instead of only covering the opening 60 seconds.
+            interval = max(5.0, duration / max_frames)
+            raw_frames = await _extract_frames(
+                video_path, ffmpeg, Path(tmpdir), interval, max_frames
+            )
+            cand_text = {}
 
     if not raw_frames:
         logger.warning("No frames extracted from %s", video_path.name)
@@ -187,7 +195,9 @@ async def analyze_video_visually(
     })
 
     for i, (ts, img_bytes) in enumerate(raw_frames):
-        transcript_text = _get_transcript_window(words or [], ts)
+        transcript_text = cand_text.get(ts) if cand_text else _get_transcript_window(words or [], ts)
+        if transcript_text is None:
+            transcript_text = _get_transcript_window(words or [], ts)
         content.append({
             "type": "text",
             "text": (
@@ -231,10 +241,22 @@ async def analyze_video_visually(
 
         scored: list[dict] = result.get("frames", [])
 
-        # Stamp actual timestamps (model may have slightly different values)
-        for i, frame in enumerate(scored):
-            if i < len(raw_frames):
-                frame["timestamp_s"] = raw_frames[i][0]
+        # Map each scored frame back to the timestamp of the frame we actually
+        # sent, by frame_id — robust to the model dropping/reordering frames.
+        ts_by_id = {i: raw_frames[i][0] for i in range(len(raw_frames))}
+        aligned: list[dict] = []
+        for frame in scored:
+            fid = frame.get("frame_id")
+            if isinstance(fid, int) and fid in ts_by_id:
+                frame["timestamp_s"] = ts_by_id[fid]
+                aligned.append(frame)
+            else:
+                logger.warning("Dropping frame with unmappable frame_id=%r", fid)
+        scored = aligned
+        if len(scored) != len(raw_frames):
+            logger.warning(
+                "Frame count mismatch: sent %d, mapped %d", len(raw_frames), len(scored)
+            )
 
         # Build personas_principales from high-confidence identifications
         known: dict[str, dict] = {}
