@@ -49,3 +49,30 @@ def test_partial_recurso_not_padded_with_speaker():
     out = _select_recurso(segs, target_duration=30.0, max_segs=None)
     assert len(out) == 1
     assert out[0]["hablante"] == "plano_sala"
+
+
+from src.services.segment_selection import select_segments
+
+
+def _frame(ts, score, hablante):
+    return {"timestamp_s": ts, "puntuacion": score, "hablante": hablante}
+
+
+def test_cola_routes_to_recurso_selection():
+    frames = [
+        _frame(2.0, 9, "Pedro Sánchez"),
+        _frame(20.0, 2, "plano_sala"),
+        _frame(40.0, 3, "plano_sala"),
+    ]
+    out = select_segments(frames, target_duration=60.0, words=[], tipo_pieza="cola")
+    assert out
+    assert all(s["hablante"] != "Pedro Sánchez" for s in out)
+
+
+def test_nota_still_picks_high_score_speaker():
+    frames = [
+        _frame(2.0, 9, "Pedro Sánchez"),
+        _frame(20.0, 2, "plano_sala"),
+    ]
+    out = select_segments(frames, target_duration=60.0, words=[], tipo_pieza="nota")
+    assert any(s["hablante"] == "Pedro Sánchez" for s in out)

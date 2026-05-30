@@ -377,6 +377,8 @@ def select_segments(
     elif tipo_pieza in ("vtr", "nota"):
         # 12s clips from 5s-interval frames overlap heavily — enforce no overlap
         result = _select_non_overlapping(segments, target_duration, max_segs)
+    elif tipo_pieza in _RECURSO_TYPES:
+        result = _select_recurso(segments, target_duration, max_segs)
     else:
         # Sort by score, fill up to target duration, respect max_segs
         by_score = sorted(segments, key=lambda s: s["max_score"], reverse=True)
