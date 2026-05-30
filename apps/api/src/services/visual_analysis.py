@@ -90,6 +90,43 @@ async def _extract_frames(
     return frames
 
 
+async def _extract_frames_at(
+    video_path: Path,
+    ffmpeg: str,
+    tmpdir: Path,
+    timestamps: list[float],
+    scale: str = "512:288",
+) -> list[tuple[float, bytes]]:
+    """Extract one JPEG per requested timestamp (content-driven sampling).
+
+    Higher default resolution than the grid path so documents / expressions /
+    on-screen text are legible to the scorer. Extractions run concurrently; a
+    failed or empty extraction is skipped, not fatal. Output files are prefixed
+    c_NNNN to avoid collision with the f_NNNN grid frames. Results are returned
+    in input-timestamp order.
+    """
+    async def _extract_one(i: int, ts: float) -> Path:
+        out = tmpdir / f"c_{i:04d}.jpg"
+        cmd = [
+            ffmpeg, "-y", "-ss", f"{max(0.0, ts):.2f}", "-i", str(video_path),
+            "-frames:v", "1", "-vf", f"scale={scale}", "-q:v", "4", str(out),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        return out
+
+    outs = await asyncio.gather(*[_extract_one(i, ts) for i, ts in enumerate(timestamps)])
+    frames: list[tuple[float, bytes]] = []
+    for ts, out in zip(timestamps, outs):
+        if out.exists() and out.stat().st_size > 0:
+            frames.append((round(ts, 1), out.read_bytes()))
+    return frames
+
+
 def _get_transcript_window(words: list[dict], t: float, half: float = 3.0) -> str:
     """Return the transcript text in the ±half second window around t."""
     window = [w["word"] for w in words if abs(w.get("start", 0) - t) <= half]
@@ -104,6 +141,7 @@ async def analyze_video_visually(
     tipo_contenido: str = "informativo",
     tema: str = "",
     max_frames: int | None = None,
+    candidate_moments: list[dict] | None = None,
 ) -> dict:
     """Extract frames and score them for journalistic value using Gemini Vision.
 
@@ -119,20 +157,27 @@ async def analyze_video_visually(
         logger.warning("GEMINI_API_KEY not set — visual analysis unavailable")
         return {"frames": [], "fotogramas": [], "personas_principales": []}
 
-    if max_frames is None:
-        # Cap at 12: Gemini 2.5 Flash uses internal reasoning tokens that eat into
-        # the output budget, so 12 frames × ~300 tokens/frame + overhead fits in 8000.
-        max_frames = min(max(4, int(duration / 5.0)), 12)
-    # Spread frames evenly across the full video duration.
-    # For short videos (≤60s) this keeps the natural 5s cadence.
-    # For long videos (e.g. 24min) this samples one frame every ~120s
-    # instead of only covering the opening 60 seconds.
-    interval = max(5.0, duration / max_frames)
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        raw_frames = await _extract_frames(
-            video_path, ffmpeg, Path(tmpdir), interval, max_frames
-        )
+        if candidate_moments:
+            timestamps = [c["timestamp"] for c in candidate_moments]
+            raw_frames = await _extract_frames_at(
+                video_path, ffmpeg, Path(tmpdir), timestamps
+            )
+            cand_text = {round(c["timestamp"], 1): c.get("text", "") for c in candidate_moments}
+        else:
+            if max_frames is None:
+                # Cap at 12: Gemini 2.5 Flash uses internal reasoning tokens that eat into
+                # the output budget, so 12 frames × ~300 tokens/frame + overhead fits in 8000.
+                max_frames = min(max(4, int(duration / 5.0)), 12)
+            # Spread frames evenly across the full video duration.
+            # For short videos (≤60s) this keeps the natural 5s cadence.
+            # For long videos (e.g. 24min) this samples one frame every ~120s
+            # instead of only covering the opening 60 seconds.
+            interval = max(5.0, duration / max_frames)
+            raw_frames = await _extract_frames(
+                video_path, ffmpeg, Path(tmpdir), interval, max_frames
+            )
+            cand_text = {}
 
     if not raw_frames:
         logger.warning("No frames extracted from %s", video_path.name)
@@ -150,7 +195,7 @@ async def analyze_video_visually(
     })
 
     for i, (ts, img_bytes) in enumerate(raw_frames):
-        transcript_text = _get_transcript_window(words or [], ts)
+        transcript_text = (cand_text.get(ts) or _get_transcript_window(words or [], ts)) if cand_text else _get_transcript_window(words or [], ts)
         content.append({
             "type": "text",
             "text": (
@@ -194,10 +239,24 @@ async def analyze_video_visually(
 
         scored: list[dict] = result.get("frames", [])
 
-        # Stamp actual timestamps (model may have slightly different values)
-        for i, frame in enumerate(scored):
-            if i < len(raw_frames):
-                frame["timestamp_s"] = raw_frames[i][0]
+        # Map each scored frame back to the timestamp of the frame we actually
+        # sent, by frame_id — robust to the model dropping/reordering frames.
+        # The model legitimately returns fewer frames than sent (it skips
+        # low-value ones), so a smaller count is expected, not an error.
+        ts_by_id = {i: raw_frames[i][0] for i in range(len(raw_frames))}
+        aligned: list[dict] = []
+        seen_ids: set[int] = set()
+        for frame in scored:
+            fid = frame.get("frame_id")
+            if isinstance(fid, int) and fid in ts_by_id and fid not in seen_ids:
+                frame["timestamp_s"] = ts_by_id[fid]
+                aligned.append(frame)
+                seen_ids.add(fid)
+            else:
+                logger.debug("Skipping frame with unmappable/duplicate frame_id=%r", fid)
+        scored = aligned
+        if len(scored) != len(raw_frames):
+            logger.debug("Scored %d of %d sent frames", len(scored), len(raw_frames))
 
         # Build personas_principales from high-confidence identifications
         known: dict[str, dict] = {}
