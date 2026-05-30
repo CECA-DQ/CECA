@@ -568,7 +568,9 @@ async def pieza_emision(
     all_words_trans = [t[1] for t in all_trans_raw]
 
     # Content-driven sampling: pick the moments worth scoring from the transcript
-    tema_str = body.titular.strip()
+    # Topic keywords for candidate scoring; fall back to entradilla/cuerpo when
+    # the titular is auto-generated (and thus empty at this point).
+    tema_str = (body.titular.strip() or body.entradilla.strip() or body.cuerpo.strip())[:200]
     all_candidates = [
         find_candidate_moments(
             all_words_trans[i], all_segs_trans[i], dur,
