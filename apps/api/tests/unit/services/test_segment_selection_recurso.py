@@ -76,3 +76,17 @@ def test_nota_still_picks_high_score_speaker():
     ]
     out = select_segments(frames, target_duration=60.0, words=[], tipo_pieza="nota")
     assert any(s["hablante"] == "Pedro Sánchez" for s in out)
+
+
+def test_nota_picks_highest_not_recurso_fallback():
+    # two non-overlapping speaker frames; target fits only ~one 12s clip.
+    # nota (_select_non_overlapping) picks the HIGHEST score (9);
+    # _select_recurso would instead fall back to the LOWEST (6). Asserting 9 proves
+    # nota is NOT routed through recurso.
+    frames = [
+        _frame(2.0, 9, "Pedro Sánchez"),
+        _frame(40.0, 6, "Pedro Sánchez"),
+    ]
+    out = select_segments(frames, target_duration=12.0, words=[], tipo_pieza="nota")
+    assert len(out) == 1
+    assert out[0]["max_score"] == 9

@@ -380,6 +380,9 @@ def select_segments(
     elif tipo_pieza in _RECURSO_TYPES:
         result = _select_recurso(segments, target_duration, max_segs)
     else:
+        # teaser / promo / off → score-descending fill. NOTE: off is editorially recurso
+        # (narrated b-roll) and should later use recurso selection too, but it carries a
+        # voiceover (separate audio handling) and is deferred — see the cola spec.
         # Sort by score, fill up to target duration, respect max_segs
         by_score = sorted(segments, key=lambda s: s["max_score"], reverse=True)
         selected: list[dict] = []
