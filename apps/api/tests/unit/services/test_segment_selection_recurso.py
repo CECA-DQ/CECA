@@ -100,3 +100,15 @@ def test_recurso_spread_not_frontloaded():
     out = _select_recurso(segs, target_duration=40.0, max_segs=None)
     assert out, "expected clips"
     assert out[-1]["t_start"] >= 100.0   # spread, not clustered at the start
+
+
+def test_cola_cuts_are_about_5s():
+    # recurso frames spaced 20s apart; cola clip length should be ~5s now (was 8s)
+    frames = [
+        {"timestamp_s": 10.0, "puntuacion": 2, "hablante": "plano_sala"},
+        {"timestamp_s": 30.0, "puntuacion": 2, "hablante": "plano_sala"},
+    ]
+    out = select_segments(frames, target_duration=60.0, words=[], tipo_pieza="cola")
+    assert out
+    for s in out:
+        assert abs((s["t_end"] - s["t_start"]) - 5.0) < 0.01   # 5-second cuts

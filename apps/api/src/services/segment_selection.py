@@ -34,7 +34,7 @@ _TYPE_CONFIG: dict[str, dict] = {
     "teaser":     {"min_score": 6,  "max_segs": 2,    "clip_s":   7.0, "per_frame": True},
     "promo":      {"min_score": 4,  "max_segs": 4,    "clip_s":   5.0, "per_frame": True},
     "highlights": {"min_score": 5,  "max_segs": None, "clip_s":  10.0, "per_frame": True},
-    "cola":       {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
+    "cola":       {"min_score": 1,  "max_segs": None, "clip_s":   5.0, "per_frame": True},
     "broll":      {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
     "off":        {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
     "vtr":        {"min_score": 5,  "max_segs": None, "clip_s":  12.0, "per_frame": True},
