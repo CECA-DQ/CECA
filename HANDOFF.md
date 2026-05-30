@@ -7,13 +7,14 @@
 
 ## Current state
 - `select_segments` now routes speech/declaration piece types (`_SPEECH_TYPES`) through `_build_sentence_segments` when a transcript (`words`) is present; falls back to the fixed-window / merged builder for b-roll types or when `words` is empty.
-- All 47 unit tests green; 9 tests in `test_segment_selection_sentences.py` cover the new routing (e2e), edge cases (empty candidates, ts-after-all-units nearest fallback, multiple candidates), and original sentence expansion/gap/clamp behaviour.
+- All 48 unit tests green; `test_segment_selection_sentences.py` covers the new routing (e2e), edge cases (empty candidates, ts-after-all-units nearest fallback, multiple candidates, dedup of identical spans), and sentence expansion/gap/clamp behaviour.
 - `_build_sentence_segments` docstring updated with sorted-units assumption.
 - Commit: `ed0ac0a feat(segment-selection): sentence-aligned cuts for speech types, fixed-window fallback`
 
 ## Next steps
-- Open PR for `feat/cut-sentence-alignment` → `develop`.
-- Continue `docs/split-claude-md` PR (previously pending) — base `develop`.
+- Open PR for `feat/cut-sentence-alignment` → `develop` (sentence-aligned cuts; validated single-source).
+- Open PRs for the other pushed branches: `fix/stt-timeout`, `chore/logging-visibility` (both → `develop`).
+- **Follow-up (multi-source, deferred):** today pieces use 1 source. When combining >1 source, cut timing breaks — each source is transcribed from 0.0 and `pieza_emision` flattens `words` with no offset (non-monotonic timeline), and the builders drop `fuente_index`. Fix = offset each source's `words` before flattening + thread `fuente_index` through the segment builders so clips route to the right source.
 
 ## Gotchas
 - Use Python **3.12** for the venv (uv may pick 3.14, which lacks a `greenlet` wheel → migrations crash).

@@ -102,3 +102,4 @@ scored frames ─┐
 - Real diarization (we use `_TURN_GAP_S` as a turn-change proxy).
 - Applying sentence sampling/alignment to `analizar-material` (still grid-12) and `generar-pieza` (text-only).
 - Cross-fades / transitions between clips (this design only fixes cut placement, not visual transitions).
+- **Multi-source correctness (deferred; pre-existing, widened by this change):** when a piece combines more than one source, cut timing is wrong. Each source is transcribed from `0.0` and `pieza_emision` flattens all sources' `words` with no per-source offset, so the sentence timeline is non-monotonic; the segment builders also drop `fuente_index`, so clips can't be routed to the correct source. This design is validated for **single-source** pieces only. Multi-source fix = offset each source's `words` before flattening + thread `fuente_index` through `_build_sentence_segments`/`_build_per_frame_segments`/selection. Needs its own spec.
