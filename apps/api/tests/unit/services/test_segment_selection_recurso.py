@@ -90,3 +90,13 @@ def test_nota_picks_highest_not_recurso_fallback():
     out = select_segments(frames, target_duration=12.0, words=[], tipo_pieza="nota")
     assert len(out) == 1
     assert out[0]["max_score"] == 9
+
+
+def test_recurso_spread_not_frontloaded():
+    # 60 recurso clips (8s) every 10s across a ~600s video; target 40s ≈ 5 clips.
+    # Front-loaded selection would pick t=0..40 (last t_start ~32); even spreading
+    # must reach well into the later part of the video.
+    segs = [_seg(i * 10.0, i * 10.0 + 8.0, 2, "plano_sala") for i in range(60)]
+    out = _select_recurso(segs, target_duration=40.0, max_segs=None)
+    assert out, "expected clips"
+    assert out[-1]["t_start"] >= 100.0   # spread, not clustered at the start

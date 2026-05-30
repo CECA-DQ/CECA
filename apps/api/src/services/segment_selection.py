@@ -231,8 +231,8 @@ def _select_recurso(
     max_segs: int | None,
 ) -> list[dict]:
     """Select recurso (non-declaration) clips for cola/broll, chronologically,
-    skipping overlaps. Prefers non-speaker / low-score frames; if recurso does
-    not fill the target, fills with the LEAST-declaration (lowest-score) rest —
+    skipping overlaps. Prefers non-speaker / low-score frames; if there is no
+    recurso at all, fall back to the least-declaration (lowest-score) frames —
     never the top speaker frames."""
     def _is_recurso(s: dict) -> bool:
         return (
@@ -242,6 +242,16 @@ def _select_recurso(
 
     recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
     fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["max_score"])  # least-declaration first
+
+    # Spread across the timeline: if there is more recurso than fits the budget,
+    # sample it evenly instead of taking only the earliest clips — a cola must be
+    # distributed across the whole video, not front-loaded.
+    if recurso:
+        avg_dur = sum(s["t_end"] - s["t_start"] for s in recurso) / len(recurso)
+        n_target = max(1, int(target_duration / max(avg_dur, 1.0)))
+        if len(recurso) > n_target:
+            step = len(recurso) / n_target
+            recurso = [recurso[int(i * step)] for i in range(n_target)]
 
     selected: list[dict] = []
     total = 0.0
