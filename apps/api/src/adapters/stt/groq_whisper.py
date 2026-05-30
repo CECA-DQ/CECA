@@ -33,7 +33,9 @@ class GroqWhisperProvider(STTProvider):
     """
 
     def __init__(self, api_key: str) -> None:
-        self._client = AsyncGroq(api_key=api_key)
+        # Generous timeout: transcribing a 10-minute audio chunk can take well
+        # over the SDK's ~60s default, which surfaced as "Request timed out".
+        self._client = AsyncGroq(api_key=api_key, timeout=300.0)
 
     async def transcribe(
         self,
