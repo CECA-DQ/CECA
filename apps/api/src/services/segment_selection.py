@@ -230,28 +230,31 @@ def _select_recurso(
     target_duration: float,
     max_segs: int | None,
 ) -> list[dict]:
-    """Select recurso (non-declaration) clips for cola/broll, chronologically,
-    skipping overlaps. Prefers non-speaker / low-score frames; if there is no
-    recurso at all, fall back to the least-declaration (lowest-score) frames —
-    never the top speaker frames."""
+    """Select clips for cola/broll, spread across the timeline. Prefers recurso
+    (non-speaker / low-score) frames, then tops up with the remaining frames —
+    also spread — to fill the target, so a low-recurso source still yields several
+    distinct takes instead of a single looped clip. cola/broll are rendered muted,
+    so the topped-up speaker frames carry no audio."""
     def _is_recurso(s: dict) -> bool:
         return (
             s.get("hablante", "") in ("plano_sala", "desconocido", "")
             or s.get("max_score", 0) <= _RECURSO_MAX_SCORE
         )
 
-    recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
-    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["max_score"])  # least-declaration first
+    def _spread(clips: list[dict], budget: float) -> list[dict]:
+        """Evenly sample clips across the timeline so the picks are distributed,
+        not clustered at the start."""
+        if not clips:
+            return clips
+        avg_dur = sum(c["t_end"] - c["t_start"] for c in clips) / len(clips)
+        n_target = max(1, int(budget / max(avg_dur, 1.0)))
+        if len(clips) <= n_target:
+            return clips
+        step = len(clips) / n_target
+        return [clips[int(i * step)] for i in range(n_target)]
 
-    # Spread across the timeline: if there is more recurso than fits the budget,
-    # sample it evenly instead of taking only the earliest clips — a cola must be
-    # distributed across the whole video, not front-loaded.
-    if recurso:
-        avg_dur = sum(s["t_end"] - s["t_start"] for s in recurso) / len(recurso)
-        n_target = max(1, int(target_duration / max(avg_dur, 1.0)))
-        if len(recurso) > n_target:
-            step = len(recurso) / n_target
-            recurso = [recurso[int(i * step)] for i in range(n_target)]
+    recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
+    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["t_start"])
 
     selected: list[dict] = []
     total = 0.0
@@ -268,12 +271,13 @@ def _select_recurso(
         selected.append(seg)
         total += dur
 
-    for seg in recurso:
+    # Recurso first (preferred), spread across the timeline.
+    for seg in _spread(recurso, target_duration):
         _try_add(seg)
-    # Fall back to (least-declaration) speaker frames ONLY if there is no recurso
-    # at all — a short pure-recurso cola is preferable to padding with a talking head.
-    if not selected:
-        for seg in fallback:
+    # Top up with the remaining (muted) frames — also spread — to fill the target
+    # so a low-recurso source yields several distinct takes, never a single loop.
+    if total < target_duration:
+        for seg in _spread(fallback, target_duration - total):
             _try_add(seg)
 
     if segments and not selected:
