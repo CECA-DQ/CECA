@@ -20,7 +20,7 @@ A real cola is **recurso footage (no talking-head declaration) that the presente
 - A `cola` clip carries **no audio** (silent) — the presenter narrates live.
 - Same input as a nota (URL / uploaded video, same front flow) — only processing differs by `tipo_pieza`.
 - No regression for nota/vtr/total/etc. (their selection + audio unchanged).
-- Graceful fallback: if the video has too little recurso, fill with the **least-declaration** frames (never the top speaker frames); never crash.
+- Graceful fallback: only if the video has **no recurso at all** do we fall back to the least-declaration frames (never the top speaker). A short pure-recurso cola is preferred over padding with a talking head; very short material is handled by the existing `_loop_to_duration`. Never crash.
 - Pure-Python selection logic → unit-testable.
 
 ## Decisions (from brainstorming)
@@ -42,7 +42,7 @@ _RECURSO_MAX_SCORE = 4               # Gemini band 1-4 = listening / wide / no a
 New helper `_select_recurso(segments, target_duration, max_segs)`:
 1. **recurso** = segments where `hablante in ("plano_sala", "desconocido", "")` **or** `max_score <= _RECURSO_MAX_SCORE`.
 2. Order recurso chronologically and pick spread across the timeline (reuse the existing minimum-spacing idea) until cumulative duration reaches `target_duration` (respecting `max_segs`).
-3. **Fallback** if recurso doesn't fill the target: append the remaining segments **lowest-`max_score` first** (least declaration), never highest. Still never exceed the target.
+3. **Fallback only if recurso selected nothing** (no recurso frames exist): append the remaining segments **lowest-`max_score` first** (least declaration), never the top speaker. A short pure-recurso cola is preferred over padding with a talking head; if it's far below target, the existing `_loop_to_duration` repeats recurso.
 Returns segments sorted chronologically (same dict shape as the other builders).
 
 In `select_segments` Step D, add a branch: `if tipo_pieza in _RECURSO_TYPES → result = _select_recurso(segments, target_duration, max_segs)`; all other types unchanged. (Step A/B/C unchanged; `cola`/`broll` still use `_build_per_frame_segments` in Step B — they are not speech types.)
