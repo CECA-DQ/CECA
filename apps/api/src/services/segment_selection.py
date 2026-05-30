@@ -23,6 +23,8 @@ _SILENCE_WINDOW         = 0.5
 _MIN_SILENCE_GAP        = 0.35
 _TURN_GAP_S             = 1.0    # transcript gap that likely marks a speaker turn; stop expanding
 _SPEECH_TYPES           = {"total", "teaser", "promo", "vtr", "nota", "highlights"}
+_RECURSO_TYPES          = {"cola", "broll"}   # b-roll recurso, no narration → recurso frames, muted
+_RECURSO_MAX_SCORE      = 4               # Gemini band 1-4 = listening / wide / no active speech
 
 # Per-type selection config
 # per_frame=True  → one clip per sampled frame (no merging); all types now use this
@@ -220,6 +222,52 @@ def _select_non_overlapping(
         if total + dur <= target_duration * 1.05:
             selected.append(seg)
             total += dur
+    return sorted(selected, key=lambda s: s["t_start"])
+
+
+def _select_recurso(
+    segments: list[dict],
+    target_duration: float,
+    max_segs: int | None,
+) -> list[dict]:
+    """Select recurso (non-declaration) clips for cola/broll, chronologically,
+    skipping overlaps. Prefers non-speaker / low-score frames; if recurso does
+    not fill the target, fills with the LEAST-declaration (lowest-score) rest —
+    never the top speaker frames."""
+    def _is_recurso(s: dict) -> bool:
+        return (
+            s.get("hablante", "") in ("plano_sala", "desconocido", "")
+            or s.get("max_score", 0) <= _RECURSO_MAX_SCORE
+        )
+
+    recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
+    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["max_score"])
+
+    selected: list[dict] = []
+    total = 0.0
+
+    def _try_add(seg: dict) -> None:
+        nonlocal total
+        if max_segs is not None and len(selected) >= max_segs:
+            return
+        if any(seg["t_start"] < s["t_end"] and seg["t_end"] > s["t_start"] for s in selected):
+            return
+        dur = seg["t_end"] - seg["t_start"]
+        if total + dur > target_duration * 1.05:
+            return
+        selected.append(seg)
+        total += dur
+
+    for seg in recurso:
+        _try_add(seg)
+
+    # Only add fallback (speakers) if recurso yielded almost nothing
+    if total < 5.0 and fallback:
+        for seg in fallback:
+            if total >= target_duration * 0.95:
+                break
+            _try_add(seg)
+
     return sorted(selected, key=lambda s: s["t_start"])
 
 
