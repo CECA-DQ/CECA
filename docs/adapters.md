@@ -51,10 +51,12 @@ Generates text, analyses images, produces editorial content.
 - `estimate_cost(input_tokens, output_tokens)` → float (USD)
 
 **Implementations:**
-- `ClaudeProvider` — Anthropic Claude. Primary provider.
+- `GroqProvider` — Groq (`llama-3.3-70b-versatile`). **Default** provider.
+- `ClaudeProvider` — Anthropic Claude.
+- `GeminiProvider` — Google Gemini (also used for vision: frame scoring, model `gemini-2.5-flash`).
 - `OpenAIProvider` — stub, not yet implemented.
 
-**Env var:** `LLM_PROVIDER=claude` or `LLM_PROVIDER=openai`
+**Env var:** `LLM_PROVIDER=groq | claude | gemini | openai` (default `groq`)
 
 ---
 
@@ -69,10 +71,11 @@ Transcribes audio bytes into text with per-segment timestamps and optional speak
 - `Transcript` — contains `language`, `full_text`, and a list of `TranscriptSegment` (each with `start`, `end`, `text`, `speaker`)
 
 **Implementations:**
+- `GroqWhisperProvider` — Groq-hosted Whisper. **Default** provider.
+- `WhisperAPIProvider` — calls OpenAI Whisper API (`whisper-1`) with `verbose_json` for per-segment timestamps. Diarization not supported natively by Whisper — wire `pyannote-audio` separately when needed.
 - `MockSTTProvider` — returns a fixed 4-segment transcript in Spanish. Used in all unit tests.
-- `WhisperAPIProvider` — calls OpenAI Whisper API (`whisper-1`) with `verbose_json` format to get per-segment timestamps. Diarization not supported natively by Whisper — wire `pyannote-audio` separately when needed.
 
-**Env var:** `STT_PROVIDER=mock` or `STT_PROVIDER=whisper_api`
+**Env var:** `STT_PROVIDER=groq_whisper | whisper_api | mock` (default `groq_whisper`)
 
 **Note:** The mock simulates two speakers (`speaker_0`, `speaker_1`). The Whisper implementation raises `NotImplementedError` if `with_diarization=True`.
 
@@ -134,12 +137,13 @@ Stores content embeddings and retrieves the most semantically similar entries fo
 - `SearchResult` — contains `id`, `score` (cosine similarity, 0.0–1.0), and `metadata`
 
 **Implementations:**
-- `MockVectorAdapter` — in-memory store with substring matching as a proxy for similarity. Score is 1.0 for exact match, 0.5 for partial. Used in all unit tests.
-- `PgVectorAdapter` — stores embeddings in PostgreSQL using the `pgvector` extension. Embeddings are generated via Voyage AI or Cohere (to be wired when implementing). Pending implementation.
+- `MockVectorAdapter` — in-memory store with substring matching as a proxy for similarity. Score 1.0 for exact match, 0.5 for partial. **Default**, used in all unit tests.
+- `PgVectorAdapter` — stores embeddings in PostgreSQL using the `pgvector` extension (`content_embeddings` table, migrations `0005`–`0006`). Embeddings come from the `embedding_model` setting (local multilingual-e5 by default, or Voyage/OpenAI).
+- `PgFtsAdapter` — PostgreSQL full-text search (no embeddings), as a keyword-search fallback.
 
-**Env var:** `VECTOR_PROVIDER=mock` or `VECTOR_PROVIDER=pgvector`
+**Env var:** `VECTOR_PROVIDER=mock | pgvector | pgfts` (default `mock`)
 
-**Note:** The mock does not generate real embeddings. The pgvector implementation will require a `content_embeddings` table migration and an embeddings API key.
+**Note:** `embedding_dimensions` in `config.py` must match the vector column width in the migration. Currently both are **384** (`multilingual-e5-small`): migration `0006` resizes the `content_embeddings` column to 384 despite its misleading filename (`..._to_768`). They match — but keep them in sync if you change the embedding model.
 
 ## Adding a new provider
 
