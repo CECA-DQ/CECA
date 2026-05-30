@@ -185,6 +185,11 @@ _PIECE_CONFIGS: dict[str, dict] = {
     "teaser":     {"duracion_default": 15,  "criterio": "uno o dos cortes de 5-8 segundos del instante más impactante para crear expectativa máxima", "con_locucion": False},
 }
 
+# Piece types rendered with NO audio (silent recurso the presenter narrates over
+# live). Deliberately NOT the same as segment_selection._RECURSO_TYPES: `off` is
+# also recurso but keeps a mixed voiceover, so it must NOT be muted.
+_MUTED_TYPES = {"cola", "broll"}
+
 _PROMPT_GENERAR = """Eres un editor de televisión experto que trabaja con AVID Media Composer.
 Selecciona segmentos de vídeo para montar una pieza de tipo "{tipo_pieza}".
 
@@ -737,7 +742,7 @@ async def pieza_emision(
             base_segs,
             duracion_objetivo=duracion_efectiva,
             normalize_audio=False,   # normalization runs as the final paso, after grafismos+voiceover
-            mute_clips=body.tipo_pieza in {"cola", "broll"},
+            mute_clips=body.tipo_pieza in _MUTED_TYPES,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
