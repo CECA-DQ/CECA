@@ -260,12 +260,11 @@ def _select_recurso(
 
     for seg in recurso:
         _try_add(seg)
-
-    # Only add fallback (speakers) if recurso left the piece short
-    for seg in fallback:               # only used if recurso left the piece short
-        if total >= target_duration * 0.95:
-            break
-        _try_add(seg)
+    # Fall back to (least-declaration) speaker frames ONLY if there is no recurso
+    # at all — a short pure-recurso cola is preferable to padding with a talking head.
+    if not selected:
+        for seg in fallback:
+            _try_add(seg)
 
     return sorted(selected, key=lambda s: s["t_start"])
 
