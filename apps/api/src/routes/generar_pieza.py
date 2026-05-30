@@ -737,6 +737,7 @@ async def pieza_emision(
             base_segs,
             duracion_objetivo=duracion_efectiva,
             normalize_audio=False,   # normalization runs as the final paso, after grafismos+voiceover
+            mute_clips=body.tipo_pieza in {"cola", "broll"},
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
