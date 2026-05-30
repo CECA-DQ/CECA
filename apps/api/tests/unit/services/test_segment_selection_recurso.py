@@ -33,5 +33,19 @@ def test_no_overlap_and_chronological():
     segs = [_seg(0.0, 8.0, 2), _seg(4.0, 12.0, 2), _seg(20.0, 28.0, 2)]
     out = _select_recurso(segs, target_duration=60.0, max_segs=None)
     ts = [s["t_start"] for s in out]
-    assert ts == sorted(ts)
-    assert not (0.0 in ts and 4.0 in ts)
+    assert ts[0] == 0.0          # earliest non-overlapping clip kept
+    assert 4.0 not in ts         # the overlapping 4-12 clip is skipped
+    assert len(out) == 2         # 0-8 and 20-28
+
+
+def test_partial_recurso_not_padded_with_speaker():
+    # one short recurso clip + available speakers, target far from filled →
+    # returns ONLY the recurso (no talking-head padding)
+    segs = [
+        _seg(0.0, 8.0, 2, "plano_sala"),     # the only recurso (8s)
+        _seg(10.0, 18.0, 9, "Pedro Sánchez"),
+        _seg(20.0, 28.0, 8, "Pedro Sánchez"),
+    ]
+    out = _select_recurso(segs, target_duration=30.0, max_segs=None)
+    assert len(out) == 1
+    assert out[0]["hablante"] == "plano_sala"

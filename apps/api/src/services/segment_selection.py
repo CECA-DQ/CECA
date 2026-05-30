@@ -241,7 +241,7 @@ def _select_recurso(
         )
 
     recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
-    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["max_score"])
+    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["max_score"])  # least-declaration first
 
     selected: list[dict] = []
     total = 0.0
@@ -265,6 +265,12 @@ def _select_recurso(
     if not selected:
         for seg in fallback:
             _try_add(seg)
+
+    if segments and not selected:
+        logger.warning(
+            "_select_recurso: selected 0 clips from %d segments (target %.1fs)",
+            len(segments), target_duration,
+        )
 
     return sorted(selected, key=lambda s: s["t_start"])
 
