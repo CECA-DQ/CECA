@@ -13,7 +13,7 @@ No LLM calls are made here.
 
 import logging
 
-from src.services.transcript_units import build_sentence_units  # noqa: F401 (used in Task 3)
+from src.services.transcript_units import build_sentence_units
 
 logger = logging.getLogger(__name__)
 
