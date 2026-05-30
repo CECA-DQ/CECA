@@ -13,12 +13,16 @@ No LLM calls are made here.
 
 import logging
 
+from src.services.transcript_units import build_sentence_units
+
 logger = logging.getLogger(__name__)
 
 _MIN_SCORE_DECLARACION = 5    # minimum for speaker-focused pieces
 _MERGE_GAP_S            = 10.0
 _SILENCE_WINDOW         = 0.5
 _MIN_SILENCE_GAP        = 0.35
+_TURN_GAP_S             = 1.0    # transcript gap that likely marks a speaker turn; stop expanding
+_SPEECH_TYPES           = {"total", "teaser", "promo", "vtr", "nota", "highlights"}
 
 # Per-type selection config
 # per_frame=True  → one clip per sampled frame (no merging); all types now use this
@@ -77,6 +81,68 @@ def _build_per_frame_segments(
             "razon":     f.get("razon_puntuacion", ""),
         })
     return segs
+
+
+def _find_unit_for(ts: float, units: list[dict]) -> dict | None:
+    """The sentence unit containing ts, else the nearest unit by midpoint."""
+    for u in units:
+        if u["t_start"] <= ts <= u["t_end"]:
+            return u
+    if not units:
+        return None
+    return min(units, key=lambda u: abs(u["timestamp"] - ts))
+
+
+def _build_sentence_segments(
+    candidates: list[dict],
+    units: list[dict],
+    clip_s: float,
+    max_segment_s: float,
+) -> list[dict]:
+    """One clip per frame, expanded from the enclosing sentence through whole
+    following sentences until ~clip_s, ending on a sentence boundary. Stops at a
+    transcript gap larger than _TURN_GAP_S (likely speaker turn) and never
+    exceeds max_segment_s.
+
+    units must be sorted by t_start (build_sentence_units guarantees this)."""
+    segs: list[dict] = []
+    for f in sorted(candidates, key=lambda f: f["timestamp_s"]):
+        ts = f["timestamp_s"]
+        start_unit = _find_unit_for(ts, units)
+        if start_unit is None:
+            continue
+        idx = units.index(start_unit)
+        t_start = start_unit["t_start"]
+        t_end = start_unit["t_end"]
+        j = idx + 1
+        while j < len(units):
+            nxt = units[j]
+            if nxt["t_start"] - t_end > _TURN_GAP_S:
+                break
+            if (t_end - t_start) >= clip_s:
+                break
+            if (nxt["t_end"] - t_start) > max_segment_s:
+                break
+            t_end = nxt["t_end"]
+            j += 1
+        if (t_end - t_start) > max_segment_s:
+            t_end = t_start + max_segment_s
+        segs.append({
+            "t_start": t_start,
+            "t_end": t_end,
+            "max_score": f.get("puntuacion", 0),
+            "hablante": f.get("hablante", "plano_sala"),
+            "cargo": f.get("cargo_inferido") or "",
+            "razon": f.get("razon_puntuacion", ""),
+        })
+    # Two frames inside the same sentence collapse to identical spans — keep the
+    # highest-scoring one rather than emitting duplicates.
+    unique: dict[tuple[float, float], dict] = {}
+    for s in segs:
+        key = (s["t_start"], s["t_end"])
+        if key not in unique or s["max_score"] > unique[key]["max_score"]:
+            unique[key] = s
+    return sorted(unique.values(), key=lambda s: s["t_start"])
 
 
 def _build_merged_segments(
@@ -233,7 +299,12 @@ def select_segments(
         )[:n_fallback]
 
     # Step B — build candidate segments
-    if per_frame:
+    # Speech/declaration types align cuts to whole sentences when a transcript
+    # is available; everything else keeps the fixed-window / merged behaviour.
+    units = build_sentence_units(words or []) if tipo_pieza in _SPEECH_TYPES else []
+    if units:
+        segments = _build_sentence_segments(candidates, units, clip_s, max_segment_s)
+    elif per_frame:
         segments = _build_per_frame_segments(candidates, clip_s)
     else:
         segments = _build_merged_segments(candidates, max_segment_s)
