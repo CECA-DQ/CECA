@@ -66,7 +66,9 @@ Rules: bump `version` on any change; keep the system message stable and the dyna
 
 ## Traceability and cost
 
-Every AI call is recorded for editorial audit, cost optimization, and debugging. Model: `LLMCall` (`src/models/llm_call.py` when present) with provider, model, prompt key/version, token counts, `cost_usd`, `latency_ms`, and truncated request/response payloads — all `TenantOwned`. Services that call the LLM are decorated with `track_llm_call` from `core/observability.py`. An `/admin/costs` dashboard aggregates by day, tenant, step, and prompt; alerts fire above the per-tenant threshold (`cost_alert_threshold_usd` in `config.py`).
+Every AI call should be recorded for editorial audit, cost optimization, and debugging. What exists today: the `track_llm_call` decorator in `core/observability.py` (wrap LLM-calling services with it) and the `cost_alert_threshold_usd` setting in `config.py`.
+
+Intended (not yet built — design target): an `LLMCall` `TenantOwned` model persisting provider, model, prompt key/version, token counts, `cost_usd`, `latency_ms`, and truncated request/response payloads; plus an `/admin/costs` dashboard aggregating by day, tenant, step, and prompt with alerts above the threshold.
 
 ## Migrations
 
@@ -83,17 +85,19 @@ Rules: reversible whenever possible (irreversible ones carry a comment explainin
 
 ## Testing
 
+Today only `tests/unit/` exists (currently `tests/unit/adapters/`). Intended layout as the suite grows:
+
 ```
 tests/
-├── unit/          Pure logic, no I/O — services and steps with adapter stubs
-├── integration/   Test DB + adapter stubs
-└── e2e/           Full pipeline with small fixtures
+├── unit/          Pure logic, no I/O — services and steps with adapter stubs   ← exists
+├── integration/   Test DB + adapter stubs                                       ← planned
+└── e2e/           Full pipeline with small fixtures                             ← planned
 ```
 
-- Services and pipeline steps are tested with adapter stubs (`tests/fixtures/stubs.py`), never against real APIs.
-- E2E runs against a real test DB (testcontainers).
+- Test services and pipeline steps with adapter stubs/mocks, never against real APIs.
+- E2E should run against a real test DB (e.g. testcontainers) when added.
 - Coverage target: 80% in services and orchestrator. Concrete adapters need integration coverage, not unit coverage.
-- A tenant-isolation test for every `TenantOwned` entity.
+- Write a tenant-isolation test for every `TenantOwned` entity.
 
 ```bash
 uv run pytest                 # all

@@ -25,6 +25,7 @@ dependencies = [
     "httpx",
     "yt-dlp>=2026.5.24.234402.dev0",
     "google-genai>=2.6.0",
+    "greenlet>=3.5.1",
 ]
 
 [dependency-groups]

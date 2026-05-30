@@ -55,6 +55,12 @@ uv run pytest                                        # tests  (-k tenant / --cov
 
 Propose a plan instead of executing if the task: changes an adapter used by all clients; modifies a prompt already in production; touches tenant logic; adds a new third-party SDK; violates an anti-pattern above; or spans more than three files across different modules.
 
+## Handoff on commit
+
+When you make a commit, **update `HANDOFF.md`** in the same commit: current state, next steps, and any gotchas. It is the team's "where things stand" file for whoever continues the work — keep it short and current, overwrite stale entries (git keeps the history).
+
+Where things live: **`HANDOFF.md`** = team-facing, where the work stands now (committed). **`docs/` + this file** = durable architecture and conventions (committed). Personal, machine-local session continuity is a separate concern and never goes in the repo.
+
 ## Documentation map (read on demand)
 
 | Read this | Before you… |

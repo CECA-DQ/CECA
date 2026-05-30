@@ -143,7 +143,7 @@ Stores content embeddings and retrieves the most semantically similar entries fo
 
 **Env var:** `VECTOR_PROVIDER=mock | pgvector | pgfts` (default `mock`)
 
-**Note:** `embedding_dimensions` in `config.py` must match the vector column width in the migration. ⚠️ Currently `config.py` defaults to `384` (multilingual-e5-small) while migration `0006` resizes the column to `768` — reconcile before enabling `pgvector`.
+**Note:** `embedding_dimensions` in `config.py` must match the vector column width in the migration. Currently both are **384** (`multilingual-e5-small`): migration `0006` resizes the `content_embeddings` column to 384 despite its misleading filename (`..._to_768`). They match — but keep them in sync if you change the embedding model.
 
 ## Adding a new provider
 
