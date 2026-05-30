@@ -84,6 +84,6 @@ Montaje (light, since it's a subprocess wrapper): a unit test asserting `_normal
 
 ## Out of scope (later)
 
-- `off` pieces (recurso **with** voiceover) — different audio handling; not touched.
+- `off` pieces (recurso **with** voiceover). `off` is editorially recurso too and should later route through `_select_recurso` (better frames), but it carries a voiceover (audio is mixed, not muted) so it's a separate case — deferred. Today `off` stays on the score-descending `else` branch.
 - Pulling recurso from the archive (`segmentos_archivo`) when the source has too little — deferred.
 - The text-only `generar-pieza` endpoint (could get the same `mute_clips` later for consistency).
