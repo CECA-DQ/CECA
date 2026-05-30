@@ -102,7 +102,9 @@ def _build_sentence_segments(
     """One clip per frame, expanded from the enclosing sentence through whole
     following sentences until ~clip_s, ending on a sentence boundary. Stops at a
     transcript gap larger than _TURN_GAP_S (likely speaker turn) and never
-    exceeds max_segment_s."""
+    exceeds max_segment_s.
+
+    units must be sorted by t_start (build_sentence_units guarantees this)."""
     segs: list[dict] = []
     for f in sorted(candidates, key=lambda f: f["timestamp_s"]):
         ts = f["timestamp_s"]
@@ -290,7 +292,12 @@ def select_segments(
         )[:n_fallback]
 
     # Step B — build candidate segments
-    if per_frame:
+    # Speech/declaration types align cuts to whole sentences when a transcript
+    # is available; everything else keeps the fixed-window / merged behaviour.
+    units = build_sentence_units(words or []) if tipo_pieza in _SPEECH_TYPES else []
+    if units:
+        segments = _build_sentence_segments(candidates, units, clip_s, max_segment_s)
+    elif per_frame:
         segments = _build_per_frame_segments(candidates, clip_s)
     else:
         segments = _build_merged_segments(candidates, max_segment_s)

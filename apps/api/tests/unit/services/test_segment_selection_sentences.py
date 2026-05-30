@@ -1,4 +1,4 @@
-from src.services.segment_selection import _build_sentence_segments
+from src.services.segment_selection import _build_sentence_segments, select_segments
 
 
 def _unit(t_start, t_end, text="x"):
@@ -30,3 +30,60 @@ def test_clamps_overlong_single_sentence():
     units = [_unit(0.0, 40.0)]
     segs = _build_sentence_segments([_frame(5.0)], units, clip_s=12.0, max_segment_s=20.0)
     assert segs[0]["t_start"] == 0.0 and segs[0]["t_end"] == 20.0
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tests: select_segments routing (Task 3)
+# ---------------------------------------------------------------------------
+
+def _words_two_sentences():
+    return [
+        {"start": 0.0, "end": 0.5, "word": "Una"},
+        {"start": 0.5, "end": 4.0, "word": "frase."},
+        {"start": 4.2, "end": 4.7, "word": "Otra"},
+        {"start": 4.7, "end": 8.0, "word": "frase."},
+    ]
+
+
+def test_nota_uses_sentence_aligned_cuts():
+    frames = [{"timestamp_s": 1.0, "puntuacion": 8, "hablante": "Sánchez"}]
+    out = select_segments(frames, target_duration=60.0, words=_words_two_sentences(),
+                          tipo_pieza="nota")
+    assert out, "expected at least one segment"
+    assert out[0]["t_start"] == 0.0
+
+
+def test_broll_keeps_fixed_window():
+    frames = [{"timestamp_s": 10.0, "puntuacion": 8, "hablante": "plano_sala"}]
+    out = select_segments(frames, target_duration=60.0, words=_words_two_sentences(),
+                          tipo_pieza="broll")
+    assert any(abs(s["t_start"] - 8.5) < 0.6 for s in out)
+
+
+def test_speech_type_without_words_falls_back():
+    frames = [{"timestamp_s": 10.0, "puntuacion": 8, "hablante": "Sánchez"}]
+    out = select_segments(frames, target_duration=60.0, words=[], tipo_pieza="nota")
+    assert out and any(abs(s["t_start"] - 8.5) < 0.6 for s in out)
+
+
+# ---------------------------------------------------------------------------
+# Edge-case tests for _build_sentence_segments (Task 2 review items)
+# ---------------------------------------------------------------------------
+
+def test_build_sentence_segments_empty_candidates():
+    units = [_unit(0.0, 4.0)]
+    assert _build_sentence_segments([], units, clip_s=12.0, max_segment_s=20.0) == []
+
+
+def test_build_sentence_segments_ts_after_all_units_uses_nearest():
+    units = [_unit(0.0, 4.0), _unit(4.2, 8.0)]
+    segs = _build_sentence_segments([_frame(100.0)], units, clip_s=12.0, max_segment_s=20.0)
+    assert len(segs) == 1                      # nearest-unit fallback, not skipped
+    assert segs[0]["t_start"] in (0.0, 4.2)
+
+
+def test_build_sentence_segments_multiple_candidates():
+    units = [_unit(0.0, 4.0), _unit(10.0, 14.0)]
+    segs = _build_sentence_segments([_frame(1.0), _frame(11.0)], units, clip_s=4.0, max_segment_s=20.0)
+    assert len(segs) == 2
+    assert segs[0]["t_start"] == 0.0 and segs[1]["t_start"] == 10.0
