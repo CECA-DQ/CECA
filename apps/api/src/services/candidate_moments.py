@@ -15,6 +15,8 @@ _SENT_END = (".", "?", "!")
 _NUM_RE = re.compile(r"\d")
 _MIN_WORDS = 4
 _MAX_WORDS = 60
+_MIN_SPACING_S = 4.0
+_GRID_FRACTION = 0.2
 
 
 def _finalize_unit(chunk: list[dict], bounded_by_pause: bool) -> dict:
@@ -66,3 +68,62 @@ def _build_units(words: list[dict]) -> list[dict]:
             units.append(_finalize_unit(chunk, bounded_by_pause=gap >= _SILENCE_GAP_S))
             chunk = []
     return units
+
+
+def _far_enough(ts: float, chosen: list[dict]) -> bool:
+    """Check if timestamp is at least _MIN_SPACING_S away from all chosen moments."""
+    return all(abs(ts - c["timestamp"]) >= _MIN_SPACING_S for c in chosen)
+
+
+def find_candidate_moments(
+    words: list[dict],
+    segments: list[dict],
+    duration: float,
+    tema: str = "",
+    budget: int = 25,
+) -> list[dict]:
+    """Return up to `budget` timestamps worth scoring, chronologically sorted.
+
+    Each item: {"timestamp", "t_start", "t_end", "text", "score", "source"}.
+    `source` is "sentence" (content-driven) or "grid" (coverage floor).
+    Returns [] on empty input or any failure (caller falls back to grid).
+    """
+    try:
+        if not words or duration <= 0:
+            return []
+        units = _build_units(words)
+        if not units:
+            return []
+
+        tema_keywords = [t for t in re.findall(r"\w+", tema.lower()) if len(t) > 3]
+        for u in units:
+            u["score"] = _score_unit(u, tema_keywords)
+            u["source"] = "sentence"
+
+        n_sentence = max(1, int(budget * (1 - _GRID_FRACTION)))
+        chosen: list[dict] = []
+        for u in sorted(units, key=lambda x: x["score"], reverse=True):
+            if len(chosen) >= n_sentence:
+                break
+            if _far_enough(u["timestamp"], chosen):
+                chosen.append(u)
+
+        n_grid = budget - len(chosen)
+        if n_grid > 0:
+            step = duration / (n_grid + 1)
+            for k in range(1, n_grid + 1):
+                ts = round(step * k, 1)
+                if _far_enough(ts, chosen):
+                    chosen.append({
+                        "timestamp": ts,
+                        "t_start": max(0.0, ts - 2.0),
+                        "t_end": ts + 2.0,
+                        "text": "",
+                        "score": 0.0,
+                        "source": "grid",
+                    })
+
+        return sorted(chosen, key=lambda c: c["timestamp"])[:budget]
+    except Exception as exc:
+        logger.warning("find_candidate_moments failed: %s", exc)
+        return []
