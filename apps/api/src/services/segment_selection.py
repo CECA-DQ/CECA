@@ -13,12 +13,16 @@ No LLM calls are made here.
 
 import logging
 
+from src.services.transcript_units import build_sentence_units  # noqa: F401 (used in Task 3)
+
 logger = logging.getLogger(__name__)
 
 _MIN_SCORE_DECLARACION = 5    # minimum for speaker-focused pieces
 _MERGE_GAP_S            = 10.0
 _SILENCE_WINDOW         = 0.5
 _MIN_SILENCE_GAP        = 0.35
+_TURN_GAP_S             = 1.0    # transcript gap that likely marks a speaker turn; stop expanding
+_SPEECH_TYPES           = {"total", "teaser", "promo", "vtr", "nota", "highlights"}
 
 # Per-type selection config
 # per_frame=True  → one clip per sampled frame (no merging); all types now use this
@@ -75,6 +79,59 @@ def _build_per_frame_segments(
             "hablante":  f.get("hablante", "plano_sala"),
             "cargo":     f.get("cargo_inferido") or "",
             "razon":     f.get("razon_puntuacion", ""),
+        })
+    return segs
+
+
+def _find_unit_for(ts: float, units: list[dict]) -> dict | None:
+    """The sentence unit containing ts, else the nearest unit by midpoint."""
+    for u in units:
+        if u["t_start"] <= ts <= u["t_end"]:
+            return u
+    if not units:
+        return None
+    return min(units, key=lambda u: abs(u["timestamp"] - ts))
+
+
+def _build_sentence_segments(
+    candidates: list[dict],
+    units: list[dict],
+    clip_s: float,
+    max_segment_s: float,
+) -> list[dict]:
+    """One clip per frame, expanded from the enclosing sentence through whole
+    following sentences until ~clip_s, ending on a sentence boundary. Stops at a
+    transcript gap larger than _TURN_GAP_S (likely speaker turn) and never
+    exceeds max_segment_s."""
+    segs: list[dict] = []
+    for f in sorted(candidates, key=lambda f: f["timestamp_s"]):
+        ts = f["timestamp_s"]
+        start_unit = _find_unit_for(ts, units)
+        if start_unit is None:
+            continue
+        idx = units.index(start_unit)
+        t_start = start_unit["t_start"]
+        t_end = start_unit["t_end"]
+        j = idx + 1
+        while j < len(units):
+            nxt = units[j]
+            if nxt["t_start"] - t_end > _TURN_GAP_S:
+                break
+            if (t_end - t_start) >= clip_s:
+                break
+            if (nxt["t_end"] - t_start) > max_segment_s:
+                break
+            t_end = nxt["t_end"]
+            j += 1
+        if (t_end - t_start) > max_segment_s:
+            t_end = t_start + max_segment_s
+        segs.append({
+            "t_start": t_start,
+            "t_end": t_end,
+            "max_score": f.get("puntuacion", 0),
+            "hablante": f.get("hablante", "plano_sala"),
+            "cargo": f.get("cargo_inferido") or "",
+            "razon": f.get("razon_puntuacion", ""),
         })
     return segs
 
