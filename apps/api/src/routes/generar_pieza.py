@@ -568,10 +568,11 @@ async def pieza_emision(
     all_words_trans = [t[1] for t in all_trans_raw]
 
     # Content-driven sampling: pick the moments worth scoring from the transcript
+    tema_str = body.titular.strip()
     all_candidates = [
         find_candidate_moments(
             all_words_trans[i], all_segs_trans[i], dur,
-            tema=body.titular.strip() or "", budget=25,
+            tema=tema_str, budget=25,
         )
         for i, (src, dur) in enumerate(zip(sources, source_durations))
     ]
@@ -582,7 +583,7 @@ async def pieza_emision(
             src, ffmpeg, dur,
             words=all_words_trans[i],
             tipo_contenido=body.tipo_pieza,
-            tema=body.titular.strip() or "",
+            tema=tema_str,
             candidate_moments=all_candidates[i] or None,
         )
         for i, (src, dur) in enumerate(zip(sources, source_durations))
