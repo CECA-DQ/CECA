@@ -261,12 +261,11 @@ def _select_recurso(
     for seg in recurso:
         _try_add(seg)
 
-    # Only add fallback (speakers) if recurso yielded almost nothing
-    if total < 5.0 and fallback:
-        for seg in fallback:
-            if total >= target_duration * 0.95:
-                break
-            _try_add(seg)
+    # Only add fallback (speakers) if recurso left the piece short
+    for seg in fallback:               # only used if recurso left the piece short
+        if total >= target_duration * 0.95:
+            break
+        _try_add(seg)
 
     return sorted(selected, key=lambda s: s["t_start"])
 
