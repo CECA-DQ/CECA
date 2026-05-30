@@ -537,6 +537,19 @@ async def pieza_emision(
 
     pasos_completados: list[str] = []
 
+    # Apply piece-type defaults: duration and locución from _PIECE_CONFIGS
+    piece_cfg = _PIECE_CONFIGS.get(body.tipo_pieza, _PIECE_CONFIGS["vtr"])
+    # If frontend sends the schema default (300), replace with the type's editorial default.
+    # This applies to ALL piece types including vtr — the schema default of 300 is just a
+    # placeholder sentinel, not an editorial choice.
+    duracion_solicitada = (
+        piece_cfg["duracion_default"]
+        if body.duracion_objetivo == 300
+        else body.duracion_objetivo
+    )
+    # Respect locución flag from frontend but warn when it conflicts with piece type
+    quiere_locucion = body.incluir_locucion and piece_cfg["con_locucion"]
+
     # ── PASO 1: Transcribir fuentes + análisis visual en paralelo ─────────────
     sources: list[Path] = []
     for key in body.fuentes:
@@ -573,12 +586,11 @@ async def pieza_emision(
         pasos_completados.append("analisis_visual")
 
     # Effective duration: don't request more than what the source material can provide.
-    # This prevents the loop-of-shame where 15 s of footage fills a 5-minute slot.
     max_available = max(
         (s["end"] for segs in all_segs_trans for s in segs),
-        default=float(body.duracion_objetivo),
+        default=float(duracion_solicitada),
     )
-    duracion_efectiva = min(body.duracion_objetivo, int(max_available * 0.9))
+    duracion_efectiva = min(duracion_solicitada, int(max_available * 0.9))
 
     # ── Auto-generar titular si no se proporcionó ─────────────────────────────
     titular = body.titular.strip()
@@ -653,7 +665,7 @@ async def pieza_emision(
             tipo_pieza=body.tipo_pieza,
             duracion_objetivo=duracion_efectiva,
             cintillo_label=body.cintillo_label,
-            requiere_locucion=body.incluir_locucion,
+            requiere_locucion=quiere_locucion,
             duracion_material=int(max_available),
             analisis_visual=list(all_visual),
             all_words=all_words_trans,
@@ -761,7 +773,7 @@ async def pieza_emision(
             logger.error("Grafismo application failed: %s\n%s", exc, _tb.format_exc())
 
     # ── PASO 4: Sintetizar locución y mezclar con el vídeo ────────────────────
-    if body.incluir_locucion and locucion_text:
+    if quiere_locucion and locucion_text:
         audio_key_loc: str | None = None
         try:
             audio_key_loc = await _synthesize_locucion(locucion_text, "default")

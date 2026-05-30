@@ -543,32 +543,54 @@ def _scored_segments_to_plan(
     scored_segments: list[dict],
     cintillo_label: str,
     titular: str,
+    tipo_pieza: str = "vtr",
 ) -> dict:
     """Convert select_segments() output to the standard plan dict format.
 
-    The LLM is NOT called when scored_segments are available — cuts come
-    from visual scoring, not text-only reasoning.
-    Grafismo text (speaker names from Gemini) is injected directly.
+    Segment labelling depends on tipo_pieza:
+      total/teaser/promo  → all segments are "declaracion" (no intro/cierre wrapper)
+      cola/broll/off      → all segments are "broll"; first gets cintillo
+      highlights          → declaracion if speaker identified, otherwise broll
+      vtr/nota            → first=intro, last=cierre, middle alternates declaracion/broll
     """
     segs: list[dict] = []
     n = len(scored_segments)
+    cintillo_grafismo = {
+        "tipo": "titular",
+        "texto_principal": f"{cintillo_label} — {titular[:50]}",
+        "texto_secundario": "",
+    }
+
+    _DECLARACION_ONLY = {"total", "teaser", "promo"}
+    _BROLL_ONLY       = {"cola", "broll", "off"}
 
     for i, s in enumerate(scored_segments):
-        if i == 0:
-            tipo = "intro"
-        elif i == n - 1:
-            tipo = "cierre"
+        hablante = s.get("hablante", "plano_sala")
+        has_speaker = hablante not in ("desconocido", "plano_sala", "")
+
+        if tipo_pieza in _DECLARACION_ONLY:
+            # No intro/cierre wrapper — every segment is the declaration itself
+            tipo = "declaracion"
+        elif tipo_pieza in _BROLL_ONLY:
+            tipo = "broll"
+        elif tipo_pieza == "highlights":
+            tipo = "declaracion" if has_speaker else "broll"
         else:
-            hablante = s.get("hablante", "plano_sala")
-            tipo = "declaracion" if hablante not in ("desconocido", "plano_sala", "") else "broll"
+            # vtr / nota: classic TV structure intro → body → cierre
+            if i == 0:
+                tipo = "intro"
+            elif i == n - 1:
+                tipo = "cierre"
+            else:
+                tipo = "declaracion" if has_speaker else "broll"
 
         grafismos: list[dict] = []
+
         if tipo in ("intro", "cierre"):
-            grafismos.append({
-                "tipo": "titular",
-                "texto_principal": f"{cintillo_label} — {titular[:50]}",
-                "texto_secundario": "",
-            })
+            grafismos.append(cintillo_grafismo)
+        elif tipo == "broll" and i == 0:
+            # First broll clip in cola/broll/off gets the cintillo
+            grafismos.append(cintillo_grafismo)
         elif tipo == "declaracion":
             nombre = s.get("hablante", "")
             cargo  = s.get("cargo", "")
@@ -619,7 +641,7 @@ async def generar_timeline_narrativo(
     """
     # ── Path A: visual-score-driven cuts ────────────────────────────────────
     if scored_segments:
-        plan = _scored_segments_to_plan(scored_segments, cintillo_label, titular)
+        plan = _scored_segments_to_plan(scored_segments, cintillo_label, titular, tipo_pieza)
 
         if requiere_locucion:
             # Still ask the LLM for the voiceover script, but not for cuts

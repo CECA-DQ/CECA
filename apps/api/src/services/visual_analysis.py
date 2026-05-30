@@ -119,9 +119,15 @@ async def analyze_video_visually(
         logger.warning("GEMINI_API_KEY not set — visual analysis unavailable")
         return {"frames": [], "fotogramas": [], "personas_principales": []}
 
-    interval = 5.0   # one frame every 5s — catches speaker changes within a shot
     if max_frames is None:
-        max_frames = min(max(4, int(duration / interval)), 16)  # cap at 16 frames
+        # Cap at 12: Gemini 2.5 Flash uses internal reasoning tokens that eat into
+        # the output budget, so 12 frames × ~300 tokens/frame + overhead fits in 8000.
+        max_frames = min(max(4, int(duration / 5.0)), 12)
+    # Spread frames evenly across the full video duration.
+    # For short videos (≤60s) this keeps the natural 5s cadence.
+    # For long videos (e.g. 24min) this samples one frame every ~120s
+    # instead of only covering the opening 60 seconds.
+    interval = max(5.0, duration / max_frames)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_frames = await _extract_frames(
@@ -164,7 +170,8 @@ async def analyze_video_visually(
                     system=_SYSTEM,
                     content=content,
                     temperature=0.1,
-                    max_tokens=2000,
+                    max_tokens=8000,  # Gemini 2.5 Flash uses reasoning tokens internally;
+                                      # 8000 gives headroom for 12 frames + thinking overhead
                 )
                 break
             except Exception as exc:
@@ -181,6 +188,7 @@ async def analyze_video_visually(
         raw = response.text.strip()
         start, end = raw.find("{"), raw.rfind("}") + 1
         if start == -1 or end == 0:
+            logger.warning("No JSON in Gemini vision response. First 300 chars: %s", raw[:300])
             raise ValueError("No JSON in Gemini vision response")
         result = json.loads(raw[start:end])
 

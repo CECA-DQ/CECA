@@ -54,15 +54,17 @@ async def _mix(
             str(output_path),
         ]
     else:  # mezclar
+        # duration=first: output runs as long as the original video audio (input 0).
+        # Voiceover plays over the opening; video continues after voiceover ends.
+        # -shortest is intentionally absent — cutting video to voiceover length is wrong.
         cmd = [
             ffmpeg, "-y",
             "-i", str(video_path),
             "-i", str(audio_path),
             "-filter_complex",
-            f"[0:a]volume={vol_original}[a_orig];[1:a]volume=1.0[a_vo];[a_orig][a_vo]amix=inputs=2:duration=shortest[aout]",
+            f"[0:a]volume={vol_original}[a_orig];[1:a]volume=1.0[a_vo];[a_orig][a_vo]amix=inputs=2:duration=first[aout]",
             "-map", "0:v",
             "-map", "[aout]",
-            "-shortest",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "128k",
             str(output_path),
