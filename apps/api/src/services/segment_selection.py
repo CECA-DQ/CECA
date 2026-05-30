@@ -135,7 +135,14 @@ def _build_sentence_segments(
             "cargo": f.get("cargo_inferido") or "",
             "razon": f.get("razon_puntuacion", ""),
         })
-    return segs
+    # Two frames inside the same sentence collapse to identical spans — keep the
+    # highest-scoring one rather than emitting duplicates.
+    unique: dict[tuple[float, float], dict] = {}
+    for s in segs:
+        key = (s["t_start"], s["t_end"])
+        if key not in unique or s["max_score"] > unique[key]["max_score"]:
+            unique[key] = s
+    return sorted(unique.values(), key=lambda s: s["t_start"])
 
 
 def _build_merged_segments(

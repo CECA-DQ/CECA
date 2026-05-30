@@ -90,3 +90,14 @@ def test_build_sentence_segments_multiple_candidates():
     segs = _build_sentence_segments([_frame(1.0), _frame(11.0)], units, clip_s=4.0, max_segment_s=20.0)
     assert len(segs) == 2
     assert segs[0]["t_start"] == 0.0 and segs[1]["t_start"] == 10.0
+
+
+def test_dedup_identical_spans_same_sentence():
+    units = [_unit(0.0, 4.0)]
+    # two frames in the same sentence → one segment, highest score kept
+    segs = _build_sentence_segments(
+        [_frame(1.0, score=6), _frame(2.0, score=9)],
+        units, clip_s=12.0, max_segment_s=20.0,
+    )
+    assert len(segs) == 1
+    assert segs[0]["max_score"] == 9
