@@ -95,7 +95,7 @@ def find_candidate_moments(
         if not units:
             return []
 
-        tema_keywords = [t for t in re.findall(r"\w+", tema.lower()) if len(t) > 3]
+        tema_keywords = [t for t in re.findall(r"\w+", tema.lower()) if len(t) > 3]  # skip short tokens to avoid substring noise
         for u in units:
             u["score"] = _score_unit(u, tema_keywords)
             u["source"] = "sentence"
@@ -108,7 +108,7 @@ def find_candidate_moments(
             if _far_enough(u["timestamp"], chosen):
                 chosen.append(u)
 
-        n_grid = budget - len(chosen)
+        n_grid = max(0, budget - len(chosen))
         if n_grid > 0:
             step = duration / (n_grid + 1)
             for k in range(1, n_grid + 1):
@@ -117,7 +117,7 @@ def find_candidate_moments(
                     chosen.append({
                         "timestamp": ts,
                         "t_start": max(0.0, ts - 2.0),
-                        "t_end": ts + 2.0,
+                        "t_end": min(ts + 2.0, duration),
                         "text": "",
                         "score": 0.0,
                         "source": "grid",
