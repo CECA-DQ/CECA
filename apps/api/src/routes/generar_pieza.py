@@ -816,6 +816,12 @@ async def pieza_emision(
 
     pasos_completados.append("pieza_base")
 
+    # The mandatory cintillo paragraph is the editorial summary (entradilla).
+    for seg in plan_segmentos:
+        for g in seg.get("grafismos", []):
+            if g.get("tipo") == "titular" and not g.get("texto_secundario"):
+                g["texto_secundario"] = entradilla.strip()[:200]
+
     # ── PASO 4: Convertir grafismos relativos → absolutos y aplicar ───────────
     titulo_cintillo = plan.get("titulo_cintillo") or f"{body.cintillo_label} — {body.titular[:50]}"
 

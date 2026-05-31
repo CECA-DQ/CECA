@@ -44,3 +44,15 @@ def test_total_gets_mandatory_cintillo_via_guarantee_block():
     assert len(cintillos) == 1
     assert cintillos[0]["obligatorio"] is True
     assert cintillos[0]["ancla"] == "cintillo_abajo_izq"
+
+
+def test_caller_can_fill_cintillo_paragraph():
+    # The plan leaves the paragraph empty; the route fills it from the entradilla.
+    segs = [_seg(0, 5)]
+    plan = _scored_segments_to_plan(segs, cintillo_label="ÚLTIMA HORA", titular="T", tipo_pieza="cola")
+    cintillo = next(g for s in plan["segmentos"] for g in s["grafismos"] if g["tipo"] == "titular")
+    assert cintillo["texto_secundario"] == ""   # empty until the route fills it
+    # Simulate the route filling it:
+    entradilla = "Resumen de la noticia en dos líneas."
+    cintillo["texto_secundario"] = entradilla
+    assert cintillo["texto_secundario"] == entradilla
