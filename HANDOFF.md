@@ -8,7 +8,7 @@
 ## Current state
 - **Multi-source colas (backend) DONE & validated live by the user** ("funciona"). cola/broll/total build correctly from 2-3 source videos: each clip routed to its own source. Per `docs/superpowers/plans/2026-05-31-multi-source-colas.md`.
 - **Enabling fixes committed** (made multi-source work end-to-end from the front): `fuentes` http(s) URLs are downloaded (yt-dlp/ffmpeg), cached by URL hash (`_resolve_fuentes`/`_download_fuente`/`_storage_key_for`); montage routes clips to the **downloaded** storage key, not the URL; CORS dev ports `:3001`/`:3002`; `tests/unit/routes/test_resolve_fuentes.py` (9 tests). **87 unit tests green.**
-- **Next feature: editable grafismos.** Spec written, reviewed & approved: `docs/superpowers/specs/2026-05-31-grafismos-editables-design.md`. Work continues on branch `feat/grafismos-editables`. No code yet.
+- **Current feature: editable grafismos** on branch `feat/grafismos-editables` (stacked on `feat/multi-source-colas`). Spec + **plan written** (`docs/superpowers/plans/2026-05-31-grafismos-editables.md`, 8 TDD tasks). No implementation code yet. Default auto-plan ships restyled mandatory cintillo + rótulos; corner furniture (mosca/clock/La 1) added via front editor / tuned live (follow-up).
 - Changes, all in `services/segment_selection.py` + one arg in `routes/generar_pieza.py`:
   1. The 3 `_build_*` builders preserve `fuente_index` (+ sentence dedup key now includes it).
   2. `_overlaps(a, b)` helper → overlap pruning in `_select_recurso`/`_select_non_overlapping` is source-aware (clips from different videos never falsely block each other).
