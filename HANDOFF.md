@@ -12,7 +12,7 @@
   `docs/superpowers/specs/2026-05-31-multi-source-colas-design.md`. No code yet.
 
 ## Next steps
-- Write the implementation plan (`docs/superpowers/plans/`) and execute it.
+- **Plan written:** `docs/superpowers/plans/2026-05-31-multi-source-colas.md` (4 TDD tasks). Executing now via subagent-driven-development.
 - The fix, all in `services/segment_selection.py` + one arg in `routes/generar_pieza.py`:
   1. Preserve `fuente_index` in the 3 `_build_*` segment builders (the single drop point).
   2. Make overlap checks source-aware (`_select_recurso`, `_select_non_overlapping`) so clips from different videos don't falsely block each other.
