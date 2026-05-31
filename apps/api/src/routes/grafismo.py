@@ -121,7 +121,7 @@ class GrafismoElemento(BaseModel):
     ancla: str = ""             # anchor preset; "" → default anchor for the tipo
     color_barra: str = ""       # rótulo role-bar colour override (hex), "" → default
     etiqueta: str = ""          # cintillo's optional ÚLTIMA HORA tag text, "" → no tag
-    anim: str = "fade"          # entrance/exit animation for the burned render
+    anim: str = "fade"          # entrance/exit animation for the burned render (reserved; render currently always fades)
 
 
 class GrafismoRequest(BaseModel):
@@ -248,13 +248,13 @@ def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     tag   = el.etiqueta.strip().upper()
 
     title_lines = _fit_lines(title, f_title, band_w - 2 * pad, max_lines=2)
-    par_lines   = _fit_lines(par,   f_par,   band_w - 2 * pad, max_lines=2)
+    par_lines   = _fit_lines(par,   f_par,   band_w - 2 * pad, max_lines=2) if par else []
     line_h_t = f_title.getbbox("Ag")[3] + 6
     line_h_p = f_par.getbbox("Ag")[3] + 6
     tag_h    = (f_tag.getbbox("Ag")[3] + 10) if tag else 0
     title_h  = len(title_lines) * line_h_t + 2 * pad
-    par_h    = len(par_lines) * line_h_p + 2 * pad
-    total_h  = tag_h + (_GAP if tag else 0) + title_h + _GAP + par_h
+    par_h    = (len(par_lines) * line_h_p + 2 * pad) if par_lines else 0
+    total_h  = tag_h + (_GAP if tag else 0) + title_h + (_GAP + par_h if par_lines else 0)
 
     x, y = _anchor_box("cintillo_abajo_izq", w, h, band_w, total_h)
     cur_y = y
@@ -268,11 +268,12 @@ def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     draw.rectangle([x, cur_y, x + band_w, cur_y + title_h], fill=_NEGRO_BANDA)
     for i, line in enumerate(title_lines):
         draw.text((x + pad, cur_y + pad + i * line_h_t), line, font=f_title, fill=_BLANCO)
-    cur_y += title_h + _GAP
 
-    draw.rectangle([x, cur_y, x + band_w, cur_y + par_h], fill=_BLANCO)
-    for i, line in enumerate(par_lines):
-        draw.text((x + pad, cur_y + pad + i * line_h_p), line, font=f_par, fill=_TEXTO_PARRAFO)
+    if par_lines:
+        cur_y += title_h + _GAP
+        draw.rectangle([x, cur_y, x + band_w, cur_y + par_h], fill=_BLANCO)
+        for i, line in enumerate(par_lines):
+            draw.text((x + pad, cur_y + pad + i * line_h_p), line, font=f_par, fill=_TEXTO_PARRAFO)
 
     return img
 
@@ -682,7 +683,7 @@ async def aplicar_grafismos(body: GrafismoRequest) -> dict:
         "ok": True,
         "video_key": output_key,
         "video_url": f"/api/grafismo/video/{output_key}",
-        "grafismos_aplicados": len(body.elementos),
+        "grafismos_aplicados": sum(1 for e in body.elementos if e.visible),
         "fps_salida": 25,
         "motor": "pillow+overlay",
     }

@@ -181,6 +181,16 @@ def test_new_renderers_dispatch_and_stay_in_safe_area():
         assert bbox[1] >= sy - 1 and bbox[3] <= 720 - sy + 1
 
 
+def test_cintillo_empty_paragraph_draws_no_white_band():
+    base = dict(tipo="titular", texto_principal="Titular de prueba", tiempo_inicio=0.0, duracion=5.0, etiqueta="X")
+    def white_px(img):
+        return sum(1 for p in img.getdata() if p == (255, 255, 255, 255))
+    with_par = _render_cintillo(GrafismoElemento(**base, texto_secundario="Resumen de la noticia que ocupa la banda blanca"), 1280, 720)
+    no_par   = _render_cintillo(GrafismoElemento(**base, texto_secundario=""), 1280, 720)
+    # No paragraph → no solid white band → far fewer pure-white pixels (only glyph strokes)
+    assert white_px(no_par) < white_px(with_par) / 5
+
+
 from src.routes.grafismo import _build_overlay_filter, _FADE_S
 
 

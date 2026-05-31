@@ -830,19 +830,20 @@ async def pieza_emision(
     if plan_segmentos:
         elementos = _plan_to_grafismos(plan_segmentos, base_segs, duration)
         # Ensure at least one cintillo element exists (LLM sometimes omits intro grafismo)
-        has_cintillo = any(e.tipo == "titular" for e in elementos)
+        has_cintillo = any(e.tipo in ("titular", "cintillo") for e in elementos)
         if not has_cintillo:
             elementos.insert(0, GrafismoEl(
                 tipo="titular",
-                texto_principal=titulo_cintillo,
+                texto_principal=body.titular[:120],
+                etiqueta=body.cintillo_label,
                 tiempo_inicio=2.0,
                 duracion=13.0,
             ))
     else:
         dur_int = max(30, int(duration))
         elementos = [
-            GrafismoEl(tipo="titular", texto_principal=titulo_cintillo, tiempo_inicio=2.0, duracion=13.0),
-            GrafismoEl(tipo="titular", texto_principal=titulo_cintillo,
+            GrafismoEl(tipo="titular", texto_principal=body.titular[:120], etiqueta=body.cintillo_label, tiempo_inicio=2.0, duracion=13.0),
+            GrafismoEl(tipo="titular", texto_principal=body.titular[:120], etiqueta=body.cintillo_label,
                        tiempo_inicio=max(15.0, dur_int - 22.0), duracion=18.0),
         ]
 
@@ -913,7 +914,7 @@ async def pieza_emision(
         "material_en_loop": material_en_loop,
         "titulo_generado": titulo_cintillo,
         "locucion_texto": locucion_text if body.incluir_locucion else None,
-        "grafismos_aplicados": len(elementos),
+        "grafismos_aplicados": sum(1 for e in elementos if e.visible),
         "segmentos_montados": len(base_segs),
         "pasos_completados": pasos_completados,
         "lufs_salida": -23 if lufs_normalizado else None,
