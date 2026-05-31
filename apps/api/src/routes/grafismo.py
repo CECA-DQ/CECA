@@ -522,7 +522,9 @@ def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     if el.tipo == "rotulo_persona":
         return _render_lower_third(el, w, h)
     if el.tipo == "rotulo_persona_simultaneo":
-        return _render_lower_third_simultaneo(el, w, h)
+        # Render the same as a normal rótulo (bottom-right, new style). The old
+        # left-anchored "simultaneo" layout collided with the new left cintillo.
+        return _render_lower_third(el, w, h)
     if el.tipo == "dato":
         return _render_dato(el, w, h)
     if el.tipo == "pie_pagina":
@@ -594,6 +596,15 @@ def _build_overlay_filter(elementos: list[GrafismoElemento]) -> tuple[list[int],
     return visible, ";".join(parts)
 
 
+def _overlay_input_args(el: GrafismoElemento, png: Path) -> list[str]:
+    """FFmpeg input args for one overlay PNG. The image is looped past its t1 by
+    a fade tail so the alpha fade-out fully completes in transparent frames before
+    EOF — otherwise overlay's eof_action=repeat freezes the last (still partly
+    visible) frame and the grafismo never finishes hiding."""
+    end = el.tiempo_inicio + el.duracion + _FADE_S
+    return ["-loop", "1", "-t", f"{end:.2f}", "-i", str(png)]
+
+
 # ---------------------------------------------------------------------------
 # Core apply function
 # ---------------------------------------------------------------------------
@@ -621,12 +632,7 @@ async def _apply_grafismos(
 
     inputs: list[str] = ["-i", str(input_path)]
     for k, idx in enumerate(visible):
-        el = elementos[idx]
-        # Loop the static PNG from 0 to t1 so the alpha fade ramps at absolute
-        # times; after t1 the input EOFs (overlay eof_action=repeat keeps the
-        # final, fully-transparent frame → invisible).
-        t1 = el.tiempo_inicio + el.duracion
-        inputs += ["-loop", "1", "-t", f"{t1:.2f}", "-i", str(rendered[k])]
+        inputs += _overlay_input_args(elementos[idx], rendered[k])
 
     cmd = (
         [ffmpeg, "-y"]

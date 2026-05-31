@@ -211,3 +211,26 @@ def test_overlay_filter_fades_within_window():
     assert "fade=t=in:st=2.00:d=0.40:alpha=1" in filt
     assert "fade=t=out:st=7.60:d=0.40:alpha=1" in filt   # fade-out starts at t1 - fade
     assert "overlay=0:0[" in filt            # alpha gates visibility; no enable= needed
+
+
+def test_simultaneo_rotulo_is_right_anchored_not_over_cintillo():
+    # rotulo_persona_simultaneo must render like the normal (bottom-right) rótulo,
+    # not the old left-anchored style that collided with the left cintillo.
+    el = GrafismoElemento(
+        tipo="rotulo_persona_simultaneo", texto_principal="Pedro Sánchez",
+        texto_secundario="Presidente del Gobierno", tiempo_inicio=0.0, duracion=6.0,
+        ancla="rotulo_abajo_dcha",
+    )
+    img = _render_element(el, 1280, 720)
+    bbox = img.getbbox()
+    assert bbox is not None
+    assert bbox[0] > 1280 * 0.5   # painted pixels on the RIGHT half (no left collision)
+
+
+def test_overlay_input_loops_past_fade_out():
+    from pathlib import Path
+    from src.routes.grafismo import _overlay_input_args
+    el = _vis("cintillo", 2.0, 6.0)            # t1 = 8.0
+    args = _overlay_input_args(el, Path("/tmp/x.png"))
+    t = float(args[args.index("-t") + 1])
+    assert t >= 8.0 + _FADE_S - 0.001          # input extends past t1 by the fade tail
