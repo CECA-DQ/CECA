@@ -179,3 +179,25 @@ def test_new_renderers_dispatch_and_stay_in_safe_area():
         assert bbox is not None, f"{tipo} rendered nothing"
         assert bbox[0] >= sx - 1 and bbox[2] <= 1280 - sx + 1
         assert bbox[1] >= sy - 1 and bbox[3] <= 720 - sy + 1
+
+
+from src.routes.grafismo import _build_overlay_filter, _FADE_S
+
+
+def _vis(tipo, t0, dur, visible=True):
+    return GrafismoElemento(tipo=tipo, texto_principal="x", tiempo_inicio=t0, duracion=dur, visible=visible)
+
+
+def test_overlay_filter_skips_not_visible():
+    els = [_vis("cintillo", 0, 5), _vis("contacto", 0, 5, visible=False), _vis("reloj", 0, 5)]
+    rendered_idx, filt = _build_overlay_filter(els)
+    assert rendered_idx == [0, 2]            # only the 2 visible elements
+    assert filt.count("overlay=") == 2
+
+
+def test_overlay_filter_fades_within_window():
+    els = [_vis("cintillo", 2.0, 6.0)]       # t0=2.0, t1=8.0, fade=0.4
+    _, filt = _build_overlay_filter(els)
+    assert "fade=t=in:st=2.00:d=0.40:alpha=1" in filt
+    assert "fade=t=out:st=7.60:d=0.40:alpha=1" in filt   # fade-out starts at t1 - fade
+    assert "overlay=0:0[" in filt            # alpha gates visibility; no enable= needed

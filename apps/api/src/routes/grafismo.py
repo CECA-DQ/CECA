@@ -563,6 +563,36 @@ async def _get_video_dimensions(ffprobe: str, video_path: Path) -> tuple[int, in
         return 1280, 720
 
 
+_FADE_S = 0.4   # entrance/exit fade duration (seconds)
+
+
+def _build_overlay_filter(elementos: list[GrafismoElemento]) -> tuple[list[int], str]:
+    """Build the filter_complex for the visible elements. Each element's PNG input
+    is looped to span [0, t1]; its alpha fades in at t0 and out ending at t1, so the
+    overlay needs NO enable= clause (alpha gates visibility, and the input's t-clock
+    equals the output t-clock since both start at 0). Returns (visible_indices, filter).
+    Input numbering: [0:v] is the base video; visible element k is input [k+1:v].
+    """
+    visible = [i for i, el in enumerate(elementos) if el.visible]
+    parts: list[str] = []
+    prev = "0:v"
+    for k, idx in enumerate(visible):
+        el = elementos[idx]
+        t0 = el.tiempo_inicio
+        t1 = t0 + el.duracion
+        fade = min(_FADE_S, max(0.05, el.duracion / 2))
+        parts.append(
+            f"[{k + 1}:v]format=yuva420p,"
+            f"fade=t=in:st={t0:.2f}:d={fade:.2f}:alpha=1,"
+            f"fade=t=out:st={t1 - fade:.2f}:d={fade:.2f}:alpha=1[g{k}]"
+        )
+        out = f"v{k + 1}"
+        parts.append(f"[{prev}][g{k}]overlay=0:0[{out}]")
+        prev = out
+    parts.append(f"[{prev}]copy[vout]")
+    return visible, ";".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Core apply function
 # ---------------------------------------------------------------------------
@@ -578,40 +608,24 @@ async def _apply_grafismos(
     w, h = await _get_video_dimensions(ffprobe, input_path)
     loop = asyncio.get_running_loop()
 
-    # 1. Render each element as RGBA PNG at video resolution
-    rendered: list[tuple[GrafismoElemento, Path]] = []
-    for i, el in enumerate(elementos):
-        png = tmpdir / f"el_{i:03d}.png"
-        img = await loop.run_in_executor(None, _render_element, el, w, h)
+    visible, filter_complex = _build_overlay_filter(elementos)
+
+    # Render each VISIBLE element as a PNG (in input order)
+    rendered: list[Path] = []
+    for k, idx in enumerate(visible):
+        png = tmpdir / f"el_{k:03d}.png"
+        img = await loop.run_in_executor(None, _render_element, elementos[idx], w, h)
         img.save(str(png), "PNG")
-        rendered.append((el, png))
+        rendered.append(png)
 
-    # 2. Mosca always on top
-    mosca_png = tmpdir / "mosca.png"
-    mosca_img = await loop.run_in_executor(None, _render_mosca, w, h)
-    mosca_img.save(str(mosca_png), "PNG")
-
-    # 3. Build filter_complex
-    filter_parts: list[str] = []
-    prev = "0:v"
-    for i, (el, _) in enumerate(rendered):
-        t0 = el.tiempo_inicio
-        t1 = t0 + el.duracion
-        out = f"v{i + 1}"
-        filter_parts.append(
-            f"[{prev}][{i + 1}:v]overlay=0:0:enable='between(t,{t0},{t1})'[{out}]"
-        )
-        prev = out
-
-    mosca_idx = len(rendered) + 1
-    filter_parts.append(f"[{prev}][{mosca_idx}:v]overlay=0:0[vout]")
-    filter_complex = ";".join(filter_parts)
-
-    # 4. FFmpeg command
     inputs: list[str] = ["-i", str(input_path)]
-    for _, png in rendered:
-        inputs += ["-i", str(png)]
-    inputs += ["-i", str(mosca_png)]
+    for k, idx in enumerate(visible):
+        el = elementos[idx]
+        # Loop the static PNG from 0 to t1 so the alpha fade ramps at absolute
+        # times; after t1 the input EOFs (overlay eof_action=repeat keeps the
+        # final, fully-transparent frame → invisible).
+        t1 = el.tiempo_inicio + el.duracion
+        inputs += ["-loop", "1", "-t", f"{t1:.2f}", "-i", str(rendered[k])]
 
     cmd = (
         [ffmpeg, "-y"]
