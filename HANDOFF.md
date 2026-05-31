@@ -6,18 +6,18 @@
 **Branch:** `feat/multi-source-colas` (from `develop`) · **Updated:** 2026-05-31
 
 ## Current state
-- All prior work (PRs #1–#6) is **merged into `develop`**: lean CLAUDE.md split, STT timeout, log visibility, vision candidate-moments, sentence-aligned cuts, and the muted recurso **cola**.
-- **Starting multi-source colas (backend).** Design written, verified line-by-line
-  against the code, and approved:
-  `docs/superpowers/specs/2026-05-31-multi-source-colas-design.md`. No code yet.
+- **Multi-source colas (backend) DONE.** cola/broll/total now build correctly from 2-3 source videos: each clip is routed to its own source. Implemented per `docs/superpowers/plans/2026-05-31-multi-source-colas.md` (spec: `docs/superpowers/specs/2026-05-31-multi-source-colas-design.md`).
+- Changes, all in `services/segment_selection.py` + one arg in `routes/generar_pieza.py`:
+  1. The 3 `_build_*` builders preserve `fuente_index` (+ sentence dedup key now includes it).
+  2. `_overlaps(a, b)` helper → overlap pruning in `_select_recurso`/`_select_non_overlapping` is source-aware (clips from different videos never falsely block each other).
+  3. `select_segments(n_fuentes=…)`; nota/vtr with ≥2 sources fall back to per-frame (no unreliable cross-source sentence alignment). Route passes `n_fuentes=len(body.fuentes)`.
+- Downstream (`_scored_segments_to_plan`, `_deduplicate_segments`, `_snap_segment_boundaries`, `fuentes[idx]→storage_key`) was already source-aware — untouched.
+- **78 unit tests green** (62 prior + 16 new in `test_segment_selection_multisource.py`). Reviewed: spec + code quality per task, plus a final holistic review (Ready to merge).
+- Frontend already sends `fuentes: [...]`, so no coordination commit needed.
 
 ## Next steps
-- **Plan written:** `docs/superpowers/plans/2026-05-31-multi-source-colas.md` (4 TDD tasks). Executing now via subagent-driven-development.
-- The fix, all in `services/segment_selection.py` + one arg in `routes/generar_pieza.py`:
-  1. Preserve `fuente_index` in the 3 `_build_*` segment builders (the single drop point).
-  2. Make overlap checks source-aware (`_select_recurso`, `_select_non_overlapping`) so clips from different videos don't falsely block each other.
-  3. Add `n_fuentes` to `select_segments`; speech types (nota/vtr) with ≥2 sources fall back to per-frame.
-- Verified already source-aware (no change): `narrative_timeline._scored_segments_to_plan`, `_deduplicate_segments`, `_snap_segment_boundaries`, the `fuentes[idx] → storage_key` mapping.
+- Finish the branch (merge to `develop` / open PR). PRs via the GitHub URL (no `gh` CLI); commit email `luiscbravo94@gmail.com`.
+- Suggested live check: a real cola request with 2 related videos → confirm clips come from BOTH sources (not just video 0).
 
 ## Deferred (documented in the spec)
 - Per-source word-offset so multi-source nota/vtr can be **sentence-aligned** (not just per-frame). Needs its own spec.
