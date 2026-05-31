@@ -13,8 +13,10 @@ Layout (from bottom of frame):
 import asyncio
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -444,28 +446,77 @@ def _render_crawl(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     return img
 
 
+def _madrid_hhmm() -> str:
+    return datetime.now(ZoneInfo("Europe/Madrid")).strftime("%H:%M")
+
+
+def _render_directo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    loc = el.texto_principal.strip()
+    f = _load_font(max(11, int(h * 0.018)), bold=False)
+    text = f"  Directo  |  {loc}" if loc else "  Directo"
+    box_w = _text_w(text, f) + 26; box_h = f.getbbox("Ag")[3] + 12
+    x, y = _anchor_box(el.ancla or "directo_centro", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(8, 16, 22, 160))
+    draw.ellipse([x + 9, y + box_h // 2 - 4, x + 17, y + box_h // 2 + 4], fill=(255, 65, 54, 255))
+    draw.text((x + 22, y + 6), text.strip(), font=f, fill=_BLANCO)
+    return img
+
+
+def _render_contacto(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    phone = el.texto_principal.strip()
+    f = _load_font(max(12, int(h * 0.019)), bold=True)
+    box_w = _text_w(phone, f) + 44; box_h = f.getbbox("Ag")[3] + 12
+    x, y = _anchor_box(el.ancla or "contacto_arriba_izq", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(8, 16, 22, 210))
+    cy = y + box_h // 2
+    draw.ellipse([x + 8, cy - 8, x + 24, cy + 8], fill=(37, 211, 102, 255))
+    draw.text((x + 32, y + 6), phone, font=f, fill=_BLANCO)
+    return img
+
+
+def _render_reloj(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(13, int(h * 0.022)), bold=True)
+    text = _madrid_hhmm()
+    box_w = _text_w(text, f) + 18; box_h = f.getbbox("Ag")[3] + 10
+    x, y = _anchor_box(el.ancla or "reloj_esquina_dcha", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(0, 0, 0, 255))
+    draw.text((x + 9, y + 5), text, font=f, fill=_BLANCO)
+    return img
+
+
 def _render_mosca(w: int, h: int) -> Image.Image:
-    """Program logo watermark — top-right corner, always on top."""
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    f = _load_font(28, bold=True)
-    text = "360*"
-    tbbox = f.getbbox(text)
-    text_w = tbbox[2] - tbbox[0]
-    text_h = tbbox[3] - tbbox[1]
-
-    x = w - text_w - _RIGHT_MARGIN
-    y = 40  # top-right, inside safe zone
-
+    """Program mark '360' with a filled 0."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(18, int(h * 0.030)), bold=True)
+    text = "36"
+    tw = _text_w(text, f); th = f.getbbox("Ag")[3]
+    disc = int(th * 0.82)
+    box_w = tw + 4 + disc; box_h = th + 6
+    x, y = _anchor_box("mosca_esquina_dcha", w, h, box_w, box_h)
     draw.text((x + 2, y + 2), text, font=f, fill=(0, 0, 0, 130))
     draw.text((x, y), text, font=f, fill=_BLANCO)
+    dx = x + tw + 4; dy = y + (th - disc) // 2
+    draw.ellipse([dx, dy, dx + disc, dy + disc], fill=_BLANCO)
+    return img
 
+
+def _render_canal(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    """Channel mark 'La 1' (rendered as a bold '1')."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(24, int(h * 0.044)), bold=True)
+    text = "1"
+    box_w = _text_w(text, f) + 6; box_h = f.getbbox("Ag")[3] + 6
+    x, y = _anchor_box(el.ancla or "canal_esquina_dcha", w, h, box_w, box_h)
+    draw.text((x + 2, y + 2), text, font=f, fill=(0, 0, 0, 130))
+    draw.text((x, y), text, font=f, fill=_BLANCO)
     return img
 
 
 def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    if el.tipo == "titular":
+    if el.tipo in ("cintillo", "titular"):
         return _render_cintillo(el, w, h)
     if el.tipo == "rotulo_persona":
         return _render_lower_third(el, w, h)
@@ -477,6 +528,16 @@ def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
         return _render_crawl(el, w, h)
     if el.tipo == "frase_clave":
         return _render_frase_clave(el, w, h)
+    if el.tipo == "directo":
+        return _render_directo(el, w, h)
+    if el.tipo == "contacto":
+        return _render_contacto(el, w, h)
+    if el.tipo == "reloj":
+        return _render_reloj(el, w, h)
+    if el.tipo == "mosca":
+        return _render_mosca(w, h)
+    if el.tipo == "canal":
+        return _render_canal(el, w, h)
     return Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
 

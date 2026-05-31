@@ -152,3 +152,30 @@ def test_rotulo_long_cargo_stays_in_safe_area():
     sx = int(1280 * 0.05)
     assert bbox is not None
     assert bbox[2] <= 1280 - sx + 1   # right edge within the title-safe area
+
+
+import re
+from src.routes.grafismo import _render_element, _madrid_hhmm
+
+
+def test_madrid_hhmm_format():
+    assert re.fullmatch(r"\d{2}:\d{2}", _madrid_hhmm())
+
+
+def test_new_renderers_dispatch_and_stay_in_safe_area():
+    cases = [
+        ("directo", "Sede del PSOE, Madrid", "directo_centro"),
+        ("contacto", "610 793 793", "contacto_arriba_izq"),
+        ("reloj", "", "reloj_esquina_dcha"),
+        ("mosca", "", "mosca_esquina_dcha"),
+        ("canal", "", "canal_esquina_dcha"),
+    ]
+    sx, sy = int(1280 * 0.05), int(720 * 0.05)
+    for tipo, txt, ancla in cases:
+        el = GrafismoElemento(tipo=tipo, texto_principal=txt, tiempo_inicio=0.0, duracion=5.0, ancla=ancla)
+        img = _render_element(el, 1280, 720)
+        assert img.size == (1280, 720) and img.mode == "RGBA"
+        bbox = img.getbbox()
+        assert bbox is not None, f"{tipo} rendered nothing"
+        assert bbox[0] >= sx - 1 and bbox[2] <= 1280 - sx + 1
+        assert bbox[1] >= sy - 1 and bbox[3] <= 720 - sy + 1
