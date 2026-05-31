@@ -41,3 +41,13 @@ def test_mute_emits_video_only_no_acrossfade():
     assert "xfade=" in f and "[vout]" in f
     assert "acrossfade=" not in f
     assert "[aout]" not in f
+
+
+from src.routes.montaje import _transition_for, _TRANSITION_S
+
+
+def test_transition_for_only_nota():
+    assert _transition_for("nota") == _TRANSITION_S
+    assert _TRANSITION_S > 0
+    for tipo in ("cola", "vtr", "total", "broll", "off", "highlights", "promo", "teaser"):
+        assert _transition_for(tipo) == 0.0

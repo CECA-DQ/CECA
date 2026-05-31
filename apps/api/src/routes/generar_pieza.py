@@ -28,7 +28,7 @@ from src.routes.archivo import (
 )
 from src.routes.audio_mix import _mix
 from src.routes.grafismo import GrafismoElemento as GrafismoEl, _apply_grafismos
-from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, ensamblar
+from src.routes.montaje import SegmentoMontaje, _get_duration, _normalize_loudness, _transition_for, ensamblar
 from src.services.candidate_moments import find_candidate_moments
 from src.services.narrative_timeline import _format_visual_context, generar_timeline_narrativo
 from src.services.segment_selection import select_segments
@@ -810,6 +810,7 @@ async def pieza_emision(
             duracion_objetivo=duracion_efectiva,
             normalize_audio=False,   # normalization runs as the final paso, after grafismos+voiceover
             mute_clips=body.tipo_pieza in _MUTED_TYPES,
+            transition_s=_transition_for(body.tipo_pieza),
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
