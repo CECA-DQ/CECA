@@ -43,6 +43,8 @@ After normalising all clips (unchanged), **probe each clip's duration** (`_get_d
 - **Audio — chained `acrossfade=d=T`.** `acrossfade` overlaps the tail of input k with the head of input k+1 (no offset arg) and shrinks the total by `T` per join — matching the video chain, so audio and video stay in sync.
 - One re-encode (h264/aac), then map the final `[v]`/`[a]`.
 
+**FFmpeg gotcha (implementation note):** `xfade` requires all inputs to share pixel format, fps, SAR and timebase, or it errors with "inputs must have the same format". Even though `_normalizar_clip` already re-encodes to 1280×720/25fps/yuv420p, prefix each video input in the filter with `fps=25,format=yuv420p,setsar=1,settb=AVTB` (and resample audio consistently) before the `xfade`/`acrossfade` chain so it never fails on edge-case source metadata.
+
 Extract a **pure helper `_build_xfade_filter(durations: list[float], transition_s: float) -> str`** that returns the `filter_complex` string (video xfade chain + audio acrossfade chain). This is the unit-tested core (mirrors the existing `_build_overlay_filter` pattern in `grafismo.py`).
 
 ## Edge cases (guards)
