@@ -101,12 +101,18 @@ def get_overlay_timing(segment_duration: float, t_offset: float = 0.0) -> dict:
 # ---------------------------------------------------------------------------
 
 class GrafismoElemento(BaseModel):
-    tipo: str                   # "titular" | "rotulo_persona" | "dato" | "pie_pagina" | "frase_clave"
+    tipo: str                   # "cintillo" | "rotulo_persona" | "directo" | "contacto" | "reloj" | "mosca" | "canal" | "dato" | "frase_clave" | "pie_pagina"
     texto_principal: str
     texto_secundario: str = ""
     tiempo_inicio: float
     duracion: float
-    posicion: str = "inferior"  # kept for API compatibility — layout is now type-driven
+    posicion: str = "inferior"  # legacy, ignored (layout is anchor-driven)
+    obligatorio: bool = False   # cintillo (title+paragraph) is True; the rest False
+    visible: bool = True        # optional elements turned off in the editor are False (skipped at render)
+    ancla: str = ""             # anchor preset; "" → default anchor for the tipo
+    color_barra: str = ""       # rótulo role-bar colour override (hex), "" → default
+    etiqueta: str = ""          # cintillo's optional ÚLTIMA HORA tag text, "" → no tag
+    anim: str = "fade"          # entrance/exit animation for the burned render
 
 
 class GrafismoRequest(BaseModel):
