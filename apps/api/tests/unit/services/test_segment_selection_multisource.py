@@ -175,3 +175,19 @@ def test_speech_multisource_falls_back_to_per_frame():
     assert len(out) == 1
     assert out[0]["t_start"] == 6.5
     assert out[0]["fuente_index"] == 0
+
+
+def test_select_segments_cola_preserves_mixed_fuente_index():
+    # cola → per-frame + _select_recurso. Clips from sources 0 and 1 with
+    # overlapping local times must all survive and keep their fuente_index.
+    frames = [
+        _frame(10.0, score=3, fuente_index=0),
+        _frame(12.0, score=3, fuente_index=1),  # overlaps src 0 in local time
+        _frame(40.0, score=3, fuente_index=0),
+    ]
+    out = select_segments(
+        frames, target_duration=60.0, words=[], tipo_pieza="cola", n_fuentes=2,
+    )
+    assert len(out) == 3
+    assert {s["fuente_index"] for s in out} == {0, 1}
+    assert all("fuente_index" in s for s in out)
