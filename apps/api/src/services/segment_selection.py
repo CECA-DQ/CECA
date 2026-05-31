@@ -75,12 +75,13 @@ def _build_per_frame_segments(
     for f in sorted(candidates, key=lambda f: f["timestamp_s"]):
         ts = f["timestamp_s"]
         segs.append({
-            "t_start":   max(0.0, ts - 1.5),
-            "t_end":     ts + clip_s - 1.5,
+            "t_start": max(0.0, ts - 1.5),
+            "t_end": ts + clip_s - 1.5,
             "max_score": f.get("puntuacion", 0),
-            "hablante":  f.get("hablante", "plano_sala"),
-            "cargo":     f.get("cargo_inferido") or "",
-            "razon":     f.get("razon_puntuacion", ""),
+            "hablante": f.get("hablante", "plano_sala"),
+            "cargo": f.get("cargo_inferido") or "",
+            "razon": f.get("razon_puntuacion", ""),
+            "fuente_index": f.get("fuente_index", 0),
         })
     return segs
 
@@ -136,12 +137,15 @@ def _build_sentence_segments(
             "hablante": f.get("hablante", "plano_sala"),
             "cargo": f.get("cargo_inferido") or "",
             "razon": f.get("razon_puntuacion", ""),
+            "fuente_index": f.get("fuente_index", 0),
         })
     # Two frames inside the same sentence collapse to identical spans — keep the
-    # highest-scoring one rather than emitting duplicates.
-    unique: dict[tuple[float, float], dict] = {}
+    # highest-scoring one rather than emitting duplicates.  The dedup key
+    # includes fuente_index so multi-source frames on the same sentence span are
+    # preserved as distinct clips.
+    unique: dict[tuple[int, float, float], dict] = {}
     for s in segs:
-        key = (s["t_start"], s["t_end"])
+        key = (s["fuente_index"], s["t_start"], s["t_end"])
         if key not in unique or s["max_score"] > unique[key]["max_score"]:
             unique[key] = s
     return sorted(unique.values(), key=lambda s: s["t_start"])
@@ -151,7 +155,13 @@ def _build_merged_segments(
     candidates: list[dict],
     max_segment_s: float,
 ) -> list[dict]:
-    """Merge nearby speaker frames into soundbite windows (vtr/nota)."""
+    """Merge nearby speaker frames into soundbite windows (vtr/nota).
+
+    Only reached for piece types absent from _TYPE_CONFIG (per_frame=False); the
+    configured types never use it. The merge keeps the first frame's fuente_index
+    for a window and does not update it across a merge, so this builder is not
+    source-correct for multi-source input — acceptable while it stays unreachable
+    for real piece types (see the multi-source colas spec)."""
     segments: list[dict] = []
     current: dict | None = None
 
@@ -167,6 +177,7 @@ def _build_merged_segments(
                 "hablante":  frame.get("hablante", "desconocido"),
                 "cargo":     frame.get("cargo_inferido") or "",
                 "razon":     frame.get("razon_puntuacion", ""),
+                "fuente_index": frame.get("fuente_index", 0),
             }
         elif ts - current["t_end"] < _MERGE_GAP_S:
             current["t_end"] = ts + 8.0
@@ -184,6 +195,7 @@ def _build_merged_segments(
                 "hablante":  frame.get("hablante", "desconocido"),
                 "cargo":     frame.get("cargo_inferido") or "",
                 "razon":     frame.get("razon_puntuacion", ""),
+                "fuente_index": frame.get("fuente_index", 0),
             }
 
     if current:
