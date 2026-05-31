@@ -157,6 +157,57 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[
     return lines
 
 
+_SAFE_FRAC = 0.05   # title-safe margin as a fraction of width/height
+
+
+def _text_w(text: str, font: ImageFont.FreeTypeFont) -> int:
+    try:
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0]
+    except Exception:
+        return len(text) * 13
+
+
+def _anchor_box(ancla: str, w: int, h: int, box_w: int, box_h: int) -> tuple[int, int]:
+    """Top-left (x, y) for a box of (box_w, box_h) at a named anchor preset,
+    clamped so the box never leaves the title-safe rectangle."""
+    sx, sy = int(w * _SAFE_FRAC), int(h * _SAFE_FRAC)
+    right, bottom = w - sx, h - sy
+    presets = {
+        "cintillo_abajo_izq":  (sx, bottom - box_h),
+        "rotulo_abajo_dcha":   (right - box_w, bottom - box_h),
+        "contacto_arriba_izq": (sx, sy),
+        "directo_centro":      ((w - box_w) // 2, bottom - box_h),
+        "mosca_esquina_dcha":  (right - box_w, bottom - box_h),
+        "reloj_esquina_dcha":  (right - box_w, bottom - box_h),
+        "canal_esquina_dcha":  (right - box_w, bottom - box_h),
+    }
+    x, y = presets.get(ancla, (sx, bottom - box_h))
+    x = max(sx, min(x, right - box_w))
+    y = max(sy, min(y, bottom - box_h))
+    return x, y
+
+
+def _ellipsize(s: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
+    """Trim s (by words, then by characters) until s + '…' fits max_w."""
+    if _text_w(s, font) <= max_w:
+        return s
+    while " " in s and _text_w(s + "…", font) > max_w:
+        s = s.rsplit(" ", 1)[0]
+    while s and _text_w(s + "…", font) > max_w:
+        s = s[:-1]
+    return s + "…"
+
+
+def _fit_lines(text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines: int = 2) -> list[str]:
+    """Wrap to <= max_lines; ellipsize any line that overflows max_w (including a
+    single word with no spaces), so no line ever exceeds max_w."""
+    lines = _wrap_text(text, font, max_w)
+    if len(lines) <= max_lines:
+        return [ln if _text_w(ln, font) <= max_w else _ellipsize(ln, font, max_w) for ln in lines]
+    return lines[: max_lines - 1] + [_ellipsize(lines[max_lines - 1], font, max_w)]
+
+
 # ---------------------------------------------------------------------------
 # Element renderers
 # ---------------------------------------------------------------------------
