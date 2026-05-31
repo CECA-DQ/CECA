@@ -22,9 +22,9 @@
 - Frontend already sends `fuentes: [...]`, so no coordination commit needed.
 
 ## Next steps
-- **Decide git hygiene:** commit the uncommitted enabling fixes (above) to `feat/multi-source-colas`, then branch `feat/grafismos-editables` for the grafismos work. PRs via the GitHub URL (no `gh` CLI); commit email `luiscbravo94@gmail.com`.
-- Write the grafismos implementation plan and execute it.
-- Suggested live check: a cola request with 2 related videos → clips from BOTH sources.
+- **Current work: crossfade transitions between clips in `nota`** (cuts are too abrupt). Spec written & approved: `docs/superpowers/specs/2026-05-31-clip-transitions-nota-design.md`. Design: add `transition_s` to `montaje.ensamblar`; when >0 (route passes 0.4 for nota) use a single `xfade`(video)+`acrossfade`(audio) filter chain instead of `_concat`; pure `_build_xfade_filter` helper. Next: writing-plans → execute.
+- **Branch chain (all unmerged, stacked):** `develop` ← `feat/multi-source-colas` ← `feat/grafismos-editables` (current). Decide merge order before PRs. Editor "Option B" parked (see memory).
+- PRs via the GitHub URL (no `gh` CLI); commit email `luiscbravo94@gmail.com`.
 
 ## Deferred (documented in the spec)
 - Per-source word-offset so multi-source nota/vtr can be **sentence-aligned** (not just per-frame). Needs its own spec.
