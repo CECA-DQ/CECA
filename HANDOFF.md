@@ -7,7 +7,8 @@
 
 ## Current state
 - All prior work (PRs #1–#6) is **merged into `develop`**: lean CLAUDE.md split, STT timeout, log visibility, vision candidate-moments, sentence-aligned cuts, and the muted recurso **cola**.
-- **Starting multi-source colas (backend).** Design written and approved:
+- **Starting multi-source colas (backend).** Design written, verified line-by-line
+  against the code, and approved:
   `docs/superpowers/specs/2026-05-31-multi-source-colas-design.md`. No code yet.
 
 ## Next steps

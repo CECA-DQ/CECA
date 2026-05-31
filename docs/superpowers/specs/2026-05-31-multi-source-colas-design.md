@@ -19,8 +19,9 @@ SegmentoMontaje.storage_key`, and `montaje.ensamblar` cuts each clip from its ow
 - `_build_per_frame_segments` (lines 69-85) — used by cola/broll and by the
   multi-source speech fallback.
 - `_build_sentence_segments` (98-147) — speech types, single source.
-- `_build_merged_segments` (150-197) — currently unreachable (all types have
-  `per_frame=True`), kept for reference.
+- `_build_merged_segments` (150-197) — reached only for piece types not in
+  `_TYPE_CONFIG` (they fall to `_DEFAULT_CONFIG`, `per_frame=False`); every
+  configured type uses a per-frame builder, so the frontend never reaches it.
 
 None of the *selectors* (`_select_recurso`, `_select_non_overlapping`,
 `_select_for_total`, the highlights/teaser/promo branches) rebuild the dict — they
@@ -51,6 +52,10 @@ a false overlap:
   and snaps each segment using its own source's words (`source_cuts[src_idx]`,
   line 119). This per-source snap supersedes the single-timeline silence-snap done
   inside `select_segments` Step C.
+- `narrative_timeline._assign_grafismo_timings` (290-291) and `_improve_highlight_quotes`
+  (748-749) both pick `all_words[fuente_index]` to time/validate grafismos per source.
+  These run on Path A (lines 670-671), so propagating `fuente_index` also makes
+  grafismo timing and quote extraction source-correct for the nota/vtr fallback.
 
 ## Goal & success criteria
 
@@ -125,9 +130,10 @@ Use it in:
   with `any(_overlaps(seg, s) for s in selected)`.
 - `_select_non_overlapping` — replace its inline overlap check the same way.
 
-`_build_merged_segments` is unreachable (dead code); it gets `fuente_index` for
-consistency but its time-based merge is **not** made source-aware (YAGNI; documented
-as a known limitation if it is ever re-enabled).
+`_build_merged_segments` is only reached for unconfigured piece types (see Problem);
+it gets `fuente_index` for consistency but its time-based merge is **not** made
+source-aware (YAGNI — no real piece type reaches it; documented as a known
+limitation).
 
 ### Change (c) — speech guard
 
@@ -182,9 +188,12 @@ SegmentoMontaje(storage_key = fuentes[fuente_index]) ─► ensamblar cuts the r
 ## Error handling
 
 - Frame without `fuente_index` → defaults to 0 (single-source behaviour).
-- `fuente_index` out of range → already clamped at `generar_pieza.py:730-731`
-  (`if idx >= len(body.fuentes): idx = 0`) and in
-  `narrative_timeline._validate_plan` (`min(idx, n_fuentes-1)`).
+- In the visual-score path (Path A — the one this feature uses), `fuente_index`
+  is in range by construction: it is the source enumeration index set at
+  `generar_pieza.py:647-651`, one per `fuentes` entry. The route still clamps
+  defensively at `generar_pieza.py:730-731` (`if idx >= len(body.fuentes): idx = 0`),
+  which runs for all paths. (`_validate_plan`'s clamp at `narrative_timeline.py:795`
+  only runs on the LLM fallback Path B, not Path A.)
 - No new exceptions can reach the route; all changed functions are pure.
 
 ## Testing
@@ -219,5 +228,5 @@ The 62 existing unit tests must stay green (`n_fuentes` defaults to 1).
 - **Balanced per-source distribution** (round-robin so each source contributes
   roughly equally). The current `_spread` already gives variety and more sources
   means more candidates; a guaranteed per-source quota is a future enhancement.
-- **`_build_merged_segments` source-aware merge** — unreachable today; only if it
-  is re-enabled.
+- **`_build_merged_segments` source-aware merge** — only reached for unconfigured
+  piece types today; revisit only if it is wired to a real type.
