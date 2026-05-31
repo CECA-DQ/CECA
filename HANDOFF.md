@@ -8,7 +8,11 @@
 ## Current state
 - **Multi-source colas (backend) DONE & validated live by the user** ("funciona"). cola/broll/total build correctly from 2-3 source videos: each clip routed to its own source. Per `docs/superpowers/plans/2026-05-31-multi-source-colas.md`.
 - **Enabling fixes committed** (made multi-source work end-to-end from the front): `fuentes` http(s) URLs are downloaded (yt-dlp/ffmpeg), cached by URL hash (`_resolve_fuentes`/`_download_fuente`/`_storage_key_for`); montage routes clips to the **downloaded** storage key, not the URL; CORS dev ports `:3001`/`:3002`; `tests/unit/routes/test_resolve_fuentes.py` (9 tests). **87 unit tests green.**
-- **Current feature: editable grafismos** on branch `feat/grafismos-editables` (stacked on `feat/multi-source-colas`). Spec + **plan written** (`docs/superpowers/plans/2026-05-31-grafismos-editables.md`, 8 TDD tasks). No implementation code yet. Default auto-plan ships restyled mandatory cintillo + rótulos; corner furniture (mosca/clock/La 1) added via front editor / tuned live (follow-up).
+- **Editable grafismos (backend) DONE** on branch `feat/grafismos-editables` (stacked on `feat/multi-source-colas`). 8 TDD tasks + holistic-review fixes, **109 unit tests green**. Reviewed per-task (spec + quality) + final holistic.
+  - Restyled stepped cintillo (red inline tag + black title + white paragraph), person rótulo (white name + colour bar), new renderers (directo/contacto/reloj-Madrid/mosca-360/La 1), anchor presets + title-safe clamp + text-fit (no overflow), fade in/out in the burned MP4, `visible`/`obligatorio` fields, mandatory cintillo (title=`titular`, paragraph=`entradilla`).
+  - `/api/grafismo/aplicar` renders an edited plan; `/preview-timeline` exposes it. Same plan drives front preview + backend burn.
+  - **Not validated live yet** — needs a real cola + nota render check (use 127.0.0.1; restart API no-reload).
+  - **Follow-ups (documented in plan):** auto-include corner furniture (mosca/clock/La 1) with cluster layout; free x/y; full slide+fade in MP4; ticking clock; `_PROMPT_GRAFISMOS` is dead code; cintillo start-time differs scored-vs-LLM path.
 - Changes, all in `services/segment_selection.py` + one arg in `routes/generar_pieza.py`:
   1. The 3 `_build_*` builders preserve `fuente_index` (+ sentence dedup key now includes it).
   2. `_overlaps(a, b)` helper → overlap pruning in `_select_recurso`/`_select_non_overlapping` is source-aware (clips from different videos never falsely block each other).
