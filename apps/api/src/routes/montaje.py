@@ -140,6 +140,41 @@ async def _concat(clip_paths: list[Path], out: Path) -> None:
         raise RuntimeError(f"Concat failed: {stderr.decode()[-300:]}")
 
 
+def _build_xfade_filter(durations: list[float], transition_s: float, mute: bool = False) -> str:
+    """filter_complex to join N normalised clips with a crossfade: chained `xfade`
+    on video (cumulative offsets) + chained `acrossfade` on audio (same duration, so
+    audio and video shrink in lockstep). Each input is first normalised
+    (fps/format/sar/timebase) so xfade never errors on edge-case source metadata.
+    Returns "" when there is nothing to crossfade (caller falls back to plain concat).
+    """
+    n = len(durations)
+    if n < 2 or transition_s <= 0:
+        return ""
+    t = min(transition_s, min(durations) / 2)   # never exceed half the shortest clip
+
+    parts: list[str] = []
+    for i in range(n):
+        parts.append(f"[{i}:v]fps=25,format=yuv420p,setsar=1,settb=AVTB[s{i}]")
+
+    prev, running = "s0", durations[0]
+    for j in range(1, n):
+        out = "vout" if j == n - 1 else f"vx{j}"
+        offset = running - t
+        parts.append(
+            f"[{prev}][s{j}]xfade=transition=fade:duration={t:.2f}:offset={offset:.2f}[{out}]"
+        )
+        prev, running = out, running + durations[j] - t
+
+    if not mute:
+        aprev = "0:a"
+        for j in range(1, n):
+            out = "aout" if j == n - 1 else f"ax{j}"
+            parts.append(f"[{aprev}][{j}:a]acrossfade=d={t:.2f}[{out}]")
+            aprev = out
+
+    return ";".join(parts)
+
+
 async def _loop_to_duration(source: Path, target: float, out: Path) -> None:
     """Re-encode looping the source until it reaches target duration."""
     cmd = [
