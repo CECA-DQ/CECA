@@ -209,6 +209,17 @@ def _build_merged_segments(
     return segments
 
 
+def _overlaps(a: dict, b: dict) -> bool:
+    """Two segments overlap only if they come from the same source AND their
+    time ranges intersect. Clips from different sources share a 0-based timeline
+    but are independent footage, so they never block each other."""
+    return (
+        a.get("fuente_index", 0) == b.get("fuente_index", 0)
+        and a["t_start"] < b["t_end"]
+        and a["t_end"] > b["t_start"]
+    )
+
+
 def _select_non_overlapping(
     segments: list[dict],
     target_duration: float,
@@ -224,10 +235,7 @@ def _select_non_overlapping(
     for seg in by_score:
         if max_segs is not None and len(selected) >= max_segs:
             break
-        overlaps = any(
-            seg["t_start"] < sel["t_end"] and seg["t_end"] > sel["t_start"]
-            for sel in selected
-        )
+        overlaps = any(_overlaps(seg, sel) for sel in selected)
         if overlaps:
             continue
         dur = seg["t_end"] - seg["t_start"]
@@ -275,7 +283,7 @@ def _select_recurso(
         nonlocal total
         if max_segs is not None and len(selected) >= max_segs:
             return
-        if any(seg["t_start"] < s["t_end"] and seg["t_end"] > s["t_start"] for s in selected):
+        if any(_overlaps(seg, s) for s in selected):
             return
         dur = seg["t_end"] - seg["t_start"]
         if total + dur > target_duration * 1.05:
