@@ -21,9 +21,10 @@
 - **78 unit tests green** (62 prior + 16 new in `test_segment_selection_multisource.py`). Reviewed: spec + code quality per task, plus a final holistic review (Ready to merge).
 - Frontend already sends `fuentes: [...]`, so no coordination commit needed.
 
+- **Crossfade transitions in `nota` DONE** on branch `feat/clip-transitions` (2 TDD tasks, **117 unit tests green**, reviewed per-task + final holistic = ready to merge). `montaje.ensamblar` gained `transition_s`; when >0 (route passes 0.4 only for `nota` via `_transition_for`) it runs `_concat_xfade` — a single `xfade`(video)+`acrossfade`(audio) re-encode (pure `_build_xfade_filter`) — instead of the hard-cut `_concat`. Other piece types + the `/ensamblar` endpoint + legacy `/generar-pieza` unchanged. **Not validated live yet** (restart API no-reload, render a nota).
+
 ## Next steps
-- **Current work: crossfade transitions between clips in `nota`** (cuts are too abrupt). Spec written & approved: `docs/superpowers/specs/2026-05-31-clip-transitions-nota-design.md`. Design: add `transition_s` to `montaje.ensamblar`; when >0 (route passes 0.4 for nota) use a single `xfade`(video)+`acrossfade`(audio) filter chain instead of `_concat`; pure `_build_xfade_filter` helper. Next: writing-plans → execute.
-- **Branch chain (all unmerged, stacked):** `develop` ← `feat/multi-source-colas` ← `feat/grafismos-editables` (current). Decide merge order before PRs. Editor "Option B" parked (see memory).
+- **Branch chain (all unmerged, stacked):** `develop` ← `feat/multi-source-colas` ← `feat/grafismos-editables` ← `feat/clip-transitions` (current). Decide merge order before PRs. Editor "Option B" parked (see memory `grafismos-editor-deferred`).
 - PRs via the GitHub URL (no `gh` CLI); commit email `luiscbravo94@gmail.com`.
 
 ## Deferred (documented in the spec)
