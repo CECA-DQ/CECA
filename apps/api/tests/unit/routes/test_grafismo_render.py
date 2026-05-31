@@ -114,3 +114,41 @@ def test_cintillo_extreme_text_keeps_painted_pixels_in_safe_area():
     left, top, right, bottom = bbox
     assert left >= sx - 1 and right <= 1280 - sx + 1
     assert bottom <= 720 - sy + 1
+
+
+from src.routes.grafismo import _render_lower_third, _hex_rgba, _AZUL_CARGO
+
+
+def test_hex_rgba_parses_and_defaults():
+    assert _hex_rgba("#1f6fb2") == (31, 111, 178, 255)
+    assert _hex_rgba("") == _AZUL_CARGO          # default when empty
+    assert _hex_rgba("garbage") == _AZUL_CARGO   # default on bad input
+    assert _hex_rgba("1f6fb2") == (31, 111, 178, 255)  # without '#'
+    assert _hex_rgba("#fff") == _AZUL_CARGO            # 3-digit → default
+
+
+def test_rotulo_renders_in_safe_area():
+    el = GrafismoElemento(
+        tipo="rotulo_persona", texto_principal="Enrique Santiago",
+        texto_secundario="Portavoz Parlamentario IU", tiempo_inicio=0.0, duracion=6.0,
+        ancla="rotulo_abajo_dcha",
+    )
+    img = _render_lower_third(el, 1280, 720)
+    assert img.size == (1280, 720) and img.mode == "RGBA"
+    bbox = img.getbbox()
+    sx, sy = int(1280 * 0.05), int(720 * 0.05)
+    assert bbox and bbox[0] >= sx - 1 and bbox[2] <= 1280 - sx + 1 and bbox[3] <= 720 - sy + 1
+
+
+def test_rotulo_long_cargo_stays_in_safe_area():
+    # Use a compact no-spaces string so [:60] still overflows box_w before the fix.
+    el = GrafismoElemento(
+        tipo="rotulo_persona", texto_principal="Nombre Apellido",
+        texto_secundario="DirectorGeneralDePresupuestosYGastoPúblico" * 4,
+        tiempo_inicio=0.0, duracion=6.0, ancla="rotulo_abajo_dcha",
+    )
+    img = _render_lower_third(el, 1280, 720)
+    bbox = img.getbbox()
+    sx = int(1280 * 0.05)
+    assert bbox is not None
+    assert bbox[2] <= 1280 - sx + 1   # right edge within the title-safe area

@@ -219,6 +219,16 @@ def _fit_lines(text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines: i
 # Element renderers
 # ---------------------------------------------------------------------------
 
+def _hex_rgba(value: str, default: tuple[int, int, int, int] = _AZUL_CARGO) -> tuple[int, int, int, int]:
+    s = (value or "").lstrip("#")
+    if len(s) == 6:
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16), 255)
+        except ValueError:
+            return default
+    return default
+
+
 def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     """Stepped cintillo: optional inline red tag → black title band (white text)
     → white paragraph band (black text). Anchored bottom-left, inside safe area."""
@@ -266,30 +276,37 @@ def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
 
 
 def _render_lower_third(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    """Lower third M360: navy box above the cintillo zone + orange top accent + name + role."""
+    """Person rótulo: white bold name (with shadow) + role on a colour bar."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    nombre = el.texto_principal.strip()[:42]
-    cargo  = el.texto_secundario.strip()[:58] if el.texto_secundario else ""
+    nombre = el.texto_principal.strip()
+    cargo  = el.texto_secundario.strip()
+    bar_color = _hex_rgba(el.color_barra)
 
-    f_nombre = _load_font(26, bold=True)
-    f_cargo  = _load_font(17, bold=False)
+    f_nombre = _load_font(max(16, int(h * 0.030)), bold=True)
+    f_cargo  = _load_font(max(11, int(h * 0.018)), bold=True)
 
-    box_x = _LEFT_SAFE
-    box_y = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H  # h - 168
-    box_w = 540
-    box_h = _ROTULO_BOX_H  # 68px
+    box_w = int(w * 0.30)
+    nombre_lines = _fit_lines(nombre, f_nombre, box_w, max_lines=2)
+    line_h = f_nombre.getbbox("Ag")[3] + 4
+    nombre_h = len(nombre_lines) * line_h
+    cargo_h = (f_cargo.getbbox("Ag")[3] + 10) if cargo else 0
+    total_h = nombre_h + (6 + cargo_h if cargo else 0)
 
-    # Navy background
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NAVY_BOX)
-    # Orange accent line across the TOP of the box
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + 3], fill=_NARANJA)
-    # Name
-    draw.text((box_x + 16, box_y + 8), nombre, font=f_nombre, fill=_BLANCO)
-    # Role / cargo in orange
+    x, y = _anchor_box(el.ancla or "rotulo_abajo_dcha", w, h, box_w, total_h)
+
+    for i, line in enumerate(nombre_lines):
+        ly = y + i * line_h
+        draw.text((x + 2, ly + 2), line, font=f_nombre, fill=(0, 0, 0, 150))  # shadow
+        draw.text((x, ly), line, font=f_nombre, fill=_BLANCO)
+
     if cargo:
-        draw.text((box_x + 16, box_y + 40), cargo, font=f_cargo, fill=_NARANJA)
+        cargo = _ellipsize(cargo[:60], f_cargo, box_w - 22)
+        cargo_w = _text_w(cargo, f_cargo) + 22
+        cy = y + nombre_h + 6
+        draw.rectangle([x, cy, x + min(cargo_w, box_w), cy + cargo_h], fill=bar_color)
+        draw.text((x + 11, cy + 5), cargo, font=f_cargo, fill=_BLANCO)
 
     return img
 
