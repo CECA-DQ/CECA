@@ -354,6 +354,7 @@ def select_segments(
     min_segment_s: float = 5.0,
     max_segment_s: float = 12.0,
     tipo_pieza: str = "vtr",
+    n_fuentes: int = 1,
 ) -> list[dict]:
     """Select the best segments from journalistic-scored frames.
 
@@ -387,7 +388,15 @@ def select_segments(
     # Step B — build candidate segments
     # Speech/declaration types align cuts to whole sentences when a transcript
     # is available; everything else keeps the fixed-window / merged behaviour.
-    units = build_sentence_units(words or []) if tipo_pieza in _SPEECH_TYPES else []
+    # Multi-source speech: the flattened transcript timeline is non-monotonic
+    # across sources, so sentence alignment is unreliable — fall back to the
+    # per-frame builder (per_frame=True for all speech types). Single-source
+    # speech keeps sentence alignment.
+    units = (
+        build_sentence_units(words or [])
+        if tipo_pieza in _SPEECH_TYPES and n_fuentes < 2
+        else []
+    )
     if units:
         segments = _build_sentence_segments(candidates, units, clip_s, max_segment_s)
     elif per_frame:

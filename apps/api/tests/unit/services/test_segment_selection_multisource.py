@@ -12,6 +12,7 @@ from src.services.segment_selection import (
     _overlaps,
     _select_non_overlapping,
     _select_recurso,
+    select_segments,
 )
 from src.services.transcript_units import build_sentence_units
 
@@ -134,3 +135,43 @@ def test_select_non_overlapping_drops_same_source_overlap():
     ]
     out = _select_non_overlapping(segs, target_duration=60.0, max_segs=None)
     assert len(out) == 1
+
+
+def _speech_frame(ts, fuente_index=0, score=8):
+    return {
+        "timestamp_s": ts,
+        "puntuacion": score,
+        "hablante": "Juan",
+        "cargo_inferido": "",
+        "razon_puntuacion": "",
+        "fuente_index": fuente_index,
+    }
+
+
+def test_speech_single_source_uses_sentence_alignment():
+    # nota + 1 source → cut starts at the sentence start (5.0), not the
+    # per-frame window start (ts - 1.5 = 6.5).
+    out = select_segments(
+        [_speech_frame(8.0, fuente_index=0)],
+        target_duration=60.0,
+        words=_one_sentence_5_to_9(),
+        tipo_pieza="nota",
+        n_fuentes=1,
+    )
+    assert len(out) == 1
+    assert out[0]["t_start"] == 5.0
+
+
+def test_speech_multisource_falls_back_to_per_frame():
+    # nota + 2 sources → no sentence alignment; cut starts at the per-frame
+    # window start (ts - 1.5 = 6.5), and fuente_index is preserved.
+    out = select_segments(
+        [_speech_frame(8.0, fuente_index=0)],
+        target_duration=60.0,
+        words=_one_sentence_5_to_9(),
+        tipo_pieza="nota",
+        n_fuentes=2,
+    )
+    assert len(out) == 1
+    assert out[0]["t_start"] == 6.5
+    assert out[0]["fuente_index"] == 0

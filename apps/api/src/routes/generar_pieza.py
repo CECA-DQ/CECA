@@ -659,6 +659,7 @@ async def pieza_emision(
             target_duration=float(duracion_efectiva),
             words=words_flat,
             tipo_pieza=body.tipo_pieza,
+            n_fuentes=len(body.fuentes),
         )
         if score_selected:
             pasos_completados.append("seleccion_visual")
