@@ -13,8 +13,10 @@ Layout (from bottom of frame):
 import asyncio
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -36,6 +38,13 @@ _NAVY_BOX     = ( 10,  22,  40, 220)   # #0A1628 deep navy — element container
 _BLANCO       = (255, 255, 255, 255)
 _BLANCO_SEC   = (203, 213, 225, 255)   # #CBD5E1 secondary / cargo text
 _GRIS_CRAWL   = (148, 163, 184, 255)   # #94A3B8 ticker text
+
+# Reference broadcaster palette (approx; sample exact hex from the reference image)
+_ROJO_TAG      = (209,  46,  46, 255)   # #d12e2e  ÚLTIMA HORA tag
+_NEGRO_BANDA   = ( 17,  17,  17, 255)   # #111111  title band bg
+_TEXTO_PARRAFO = ( 26,  26,  26, 255)   # #1a1a1a  paragraph text
+_AZUL_CARGO    = ( 31, 111, 178, 255)   # #1f6fb2  default role bar
+_GAP           = 6                      # gap between cintillo blocks
 
 # Broadcast safe margins
 _LEFT_SAFE     = 80
@@ -101,12 +110,18 @@ def get_overlay_timing(segment_duration: float, t_offset: float = 0.0) -> dict:
 # ---------------------------------------------------------------------------
 
 class GrafismoElemento(BaseModel):
-    tipo: str                   # "titular" | "rotulo_persona" | "dato" | "pie_pagina" | "frase_clave"
+    tipo: str                   # "cintillo" | "rotulo_persona" | "directo" | "contacto" | "reloj" | "mosca" | "canal" | "dato" | "frase_clave" | "pie_pagina"
     texto_principal: str
     texto_secundario: str = ""
     tiempo_inicio: float
     duracion: float
-    posicion: str = "inferior"  # kept for API compatibility — layout is now type-driven
+    posicion: str = "inferior"  # legacy, ignored (layout is anchor-driven)
+    obligatorio: bool = False   # cintillo (title+paragraph) is True; the rest False
+    visible: bool = True        # optional elements turned off in the editor are False (skipped at render)
+    ancla: str = ""             # anchor preset; "" → default anchor for the tipo
+    color_barra: str = ""       # rótulo role-bar colour override (hex), "" → default
+    etiqueta: str = ""          # cintillo's optional ÚLTIMA HORA tag text, "" → no tag
+    anim: str = "fade"          # entrance/exit animation for the burned render (reserved; render currently always fades)
 
 
 class GrafismoRequest(BaseModel):
@@ -151,87 +166,150 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[
     return lines
 
 
+_SAFE_FRAC = 0.05   # title-safe margin as a fraction of width/height
+
+
+def _text_w(text: str, font: ImageFont.FreeTypeFont) -> int:
+    try:
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0]
+    except Exception:
+        return len(text) * 13
+
+
+def _anchor_box(ancla: str, w: int, h: int, box_w: int, box_h: int) -> tuple[int, int]:
+    """Top-left (x, y) for a box of (box_w, box_h) at a named anchor preset,
+    clamped so the box never leaves the title-safe rectangle."""
+    sx, sy = int(w * _SAFE_FRAC), int(h * _SAFE_FRAC)
+    right, bottom = w - sx, h - sy
+    presets = {
+        "cintillo_abajo_izq":  (sx, bottom - box_h),
+        "rotulo_abajo_dcha":   (right - box_w, bottom - box_h),
+        "contacto_arriba_izq": (sx, sy),
+        "directo_centro":      ((w - box_w) // 2, bottom - box_h),
+        "mosca_esquina_dcha":  (right - box_w, bottom - box_h),
+        "reloj_esquina_dcha":  (right - box_w, bottom - box_h),
+        "canal_esquina_dcha":  (right - box_w, bottom - box_h),
+    }
+    x, y = presets.get(ancla, (sx, bottom - box_h))
+    x = max(sx, min(x, right - box_w))
+    y = max(sy, min(y, bottom - box_h))
+    return x, y
+
+
+def _ellipsize(s: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
+    """Trim s (by words, then by characters) until s + '…' fits max_w."""
+    if _text_w(s, font) <= max_w:
+        return s
+    while " " in s and _text_w(s + "…", font) > max_w:
+        s = s.rsplit(" ", 1)[0]
+    while s and _text_w(s + "…", font) > max_w:
+        s = s[:-1]
+    return s + "…"
+
+
+def _fit_lines(text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines: int = 2) -> list[str]:
+    """Wrap to <= max_lines; ellipsize any line that overflows max_w (including a
+    single word with no spaces), so no line ever exceeds max_w."""
+    lines = _wrap_text(text, font, max_w)
+    if len(lines) <= max_lines:
+        return [ln if _text_w(ln, font) <= max_w else _ellipsize(ln, font, max_w) for ln in lines]
+    return lines[: max_lines - 1] + [_ellipsize(lines[max_lines - 1], font, max_w)]
+
+
 # ---------------------------------------------------------------------------
 # Element renderers
 # ---------------------------------------------------------------------------
 
+def _hex_rgba(value: str, default: tuple[int, int, int, int] = _AZUL_CARGO) -> tuple[int, int, int, int]:
+    s = (value or "").lstrip("#")
+    if len(s) == 6:
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16), 255)
+        except ValueError:
+            return default
+    return default
+
+
 def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    """Cintillo inferior M360: navy band + orange label box + headline (up to 2 lines)."""
+    """Stepped cintillo: optional inline red tag → black title band (white text)
+    → white paragraph band (black text). Anchored bottom-left, inside safe area."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    raw = el.texto_principal
-    if " — " in raw:
-        label, titulo = raw.split(" — ", 1)
-    elif " - " in raw:
-        label, titulo = raw.split(" - ", 1)
-    else:
-        label, titulo = "INFO", raw
+    band_w = int(w * 0.55)                       # cintillo width
+    f_tag   = _load_font(max(11, int(h * 0.018)), bold=True)
+    f_title = _load_font(max(15, int(h * 0.026)), bold=True)
+    f_par   = _load_font(max(12, int(h * 0.020)), bold=False)
+    pad = 12
 
-    label  = label.strip().upper()[:20]
-    titulo = titulo.strip()
+    title = el.texto_principal.strip()
+    par   = el.texto_secundario.strip()
+    tag   = el.etiqueta.strip().upper()
 
-    f_label  = _load_font(20, bold=True)
-    f_titulo = _load_font(21, bold=True)
-    f_sub    = _load_font(16, bold=False)
+    title_lines = _fit_lines(title, f_title, band_w - 2 * pad, max_lines=2)
+    par_lines   = _fit_lines(par,   f_par,   band_w - 2 * pad, max_lines=2) if par else []
+    line_h_t = f_title.getbbox("Ag")[3] + 6
+    line_h_p = f_par.getbbox("Ag")[3] + 6
+    tag_h    = (f_tag.getbbox("Ag")[3] + 10) if tag else 0
+    title_h  = len(title_lines) * line_h_t + 2 * pad
+    par_h    = (len(par_lines) * line_h_p + 2 * pad) if par_lines else 0
+    total_h  = tag_h + (_GAP if tag else 0) + title_h + (_GAP + par_h if par_lines else 0)
 
-    # Full-width navy background band
-    band_y = h - _CINTILLO_BAND_H
-    draw.rectangle([0, band_y, w, h], fill=_NAVY_BANDA)
+    x, y = _anchor_box("cintillo_abajo_izq", w, h, band_w, total_h)
+    cur_y = y
 
-    # Orange label box
-    lbbox = f_label.getbbox(label)
-    lbl_w = lbbox[2] - lbbox[0] + 24
-    box_x = _LEFT_SAFE
-    box_y = h - 78
-    box_h = 40
-    draw.rectangle([box_x, box_y, box_x + lbl_w, box_y + box_h], fill=_NARANJA)
-    draw.text((box_x + 12, box_y + 10), label, font=f_label, fill=_BLANCO)
+    if tag:
+        tag_w = _text_w(tag, f_tag) + 18
+        draw.rectangle([x, cur_y, x + tag_w, cur_y + tag_h], fill=_ROJO_TAG)
+        draw.text((x + 9, cur_y + 5), tag, font=f_tag, fill=_BLANCO)
+        cur_y += tag_h + _GAP
 
-    # White vertical divider
-    div_x = box_x + lbl_w + 8
-    draw.rectangle([div_x, box_y, div_x + 2, box_y + box_h], fill=(255, 255, 255, 160))
+    draw.rectangle([x, cur_y, x + band_w, cur_y + title_h], fill=_NEGRO_BANDA)
+    for i, line in enumerate(title_lines):
+        draw.text((x + pad, cur_y + pad + i * line_h_t), line, font=f_title, fill=_BLANCO)
 
-    # Headline — wrap into up to 2 lines
-    text_x = div_x + 14
-    max_text_w = w - text_x - _RIGHT_MARGIN
-    lines = _wrap_text(titulo, f_titulo, max_text_w)
-    line_spacing = 22
-    for i, line in enumerate(lines[:2]):
-        draw.text((text_x, box_y + 5 + i * line_spacing), line, font=f_titulo, fill=_BLANCO)
-
-    # Optional subtitle
-    if el.texto_secundario:
-        draw.text((box_x, h - 20), el.texto_secundario.strip()[:90], font=f_sub, fill=_BLANCO_SEC)
+    if par_lines:
+        cur_y += title_h + _GAP
+        draw.rectangle([x, cur_y, x + band_w, cur_y + par_h], fill=_BLANCO)
+        for i, line in enumerate(par_lines):
+            draw.text((x + pad, cur_y + pad + i * line_h_p), line, font=f_par, fill=_TEXTO_PARRAFO)
 
     return img
 
 
 def _render_lower_third(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    """Lower third M360: navy box above the cintillo zone + orange top accent + name + role."""
+    """Person rótulo: white bold name (with shadow) + role on a colour bar."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    nombre = el.texto_principal.strip()[:42]
-    cargo  = el.texto_secundario.strip()[:58] if el.texto_secundario else ""
+    nombre = el.texto_principal.strip()
+    cargo  = el.texto_secundario.strip()
+    bar_color = _hex_rgba(el.color_barra)
 
-    f_nombre = _load_font(26, bold=True)
-    f_cargo  = _load_font(17, bold=False)
+    f_nombre = _load_font(max(16, int(h * 0.030)), bold=True)
+    f_cargo  = _load_font(max(11, int(h * 0.018)), bold=True)
 
-    box_x = _LEFT_SAFE
-    box_y = h - _CINTILLO_BAND_H - _ROTULO_GAP - _ROTULO_BOX_H  # h - 168
-    box_w = 540
-    box_h = _ROTULO_BOX_H  # 68px
+    box_w = int(w * 0.30)
+    nombre_lines = _fit_lines(nombre, f_nombre, box_w, max_lines=2)
+    line_h = f_nombre.getbbox("Ag")[3] + 4
+    nombre_h = len(nombre_lines) * line_h
+    cargo_h = (f_cargo.getbbox("Ag")[3] + 10) if cargo else 0
+    total_h = nombre_h + (6 + cargo_h if cargo else 0)
 
-    # Navy background
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h], fill=_NAVY_BOX)
-    # Orange accent line across the TOP of the box
-    draw.rectangle([box_x, box_y, box_x + box_w, box_y + 3], fill=_NARANJA)
-    # Name
-    draw.text((box_x + 16, box_y + 8), nombre, font=f_nombre, fill=_BLANCO)
-    # Role / cargo in orange
+    x, y = _anchor_box(el.ancla or "rotulo_abajo_dcha", w, h, box_w, total_h)
+
+    for i, line in enumerate(nombre_lines):
+        ly = y + i * line_h
+        draw.text((x + 2, ly + 2), line, font=f_nombre, fill=(0, 0, 0, 150))  # shadow
+        draw.text((x, ly), line, font=f_nombre, fill=_BLANCO)
+
     if cargo:
-        draw.text((box_x + 16, box_y + 40), cargo, font=f_cargo, fill=_NARANJA)
+        cargo = _ellipsize(cargo[:60], f_cargo, box_w - 22)
+        cargo_w = _text_w(cargo, f_cargo) + 22
+        cy = y + nombre_h + 6
+        draw.rectangle([x, cy, x + min(cargo_w, box_w), cy + cargo_h], fill=bar_color)
+        draw.text((x + 11, cy + 5), cargo, font=f_cargo, fill=_BLANCO)
 
     return img
 
@@ -369,39 +447,100 @@ def _render_crawl(el: GrafismoElemento, w: int, h: int) -> Image.Image:
     return img
 
 
+def _madrid_hhmm() -> str:
+    return datetime.now(ZoneInfo("Europe/Madrid")).strftime("%H:%M")
+
+
+def _render_directo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    loc = el.texto_principal.strip()
+    f = _load_font(max(11, int(h * 0.018)), bold=False)
+    text = f"  Directo  |  {loc}" if loc else "  Directo"
+    box_w = _text_w(text, f) + 26; box_h = f.getbbox("Ag")[3] + 12
+    x, y = _anchor_box(el.ancla or "directo_centro", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(8, 16, 22, 160))
+    draw.ellipse([x + 9, y + box_h // 2 - 4, x + 17, y + box_h // 2 + 4], fill=(255, 65, 54, 255))
+    draw.text((x + 22, y + 6), text.strip(), font=f, fill=_BLANCO)
+    return img
+
+
+def _render_contacto(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    phone = el.texto_principal.strip()
+    f = _load_font(max(12, int(h * 0.019)), bold=True)
+    box_w = _text_w(phone, f) + 44; box_h = f.getbbox("Ag")[3] + 12
+    x, y = _anchor_box(el.ancla or "contacto_arriba_izq", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(8, 16, 22, 210))
+    cy = y + box_h // 2
+    draw.ellipse([x + 8, cy - 8, x + 24, cy + 8], fill=(37, 211, 102, 255))
+    draw.text((x + 32, y + 6), phone, font=f, fill=_BLANCO)
+    return img
+
+
+def _render_reloj(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(13, int(h * 0.022)), bold=True)
+    text = _madrid_hhmm()
+    box_w = _text_w(text, f) + 18; box_h = f.getbbox("Ag")[3] + 10
+    x, y = _anchor_box(el.ancla or "reloj_esquina_dcha", w, h, box_w, box_h)
+    draw.rectangle([x, y, x + box_w, y + box_h], fill=(0, 0, 0, 255))
+    draw.text((x + 9, y + 5), text, font=f, fill=_BLANCO)
+    return img
+
+
 def _render_mosca(w: int, h: int) -> Image.Image:
-    """Program logo watermark — top-right corner, always on top."""
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    f = _load_font(28, bold=True)
-    text = "360*"
-    tbbox = f.getbbox(text)
-    text_w = tbbox[2] - tbbox[0]
-    text_h = tbbox[3] - tbbox[1]
-
-    x = w - text_w - _RIGHT_MARGIN
-    y = 40  # top-right, inside safe zone
-
+    """Program mark '360' with a filled 0."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(18, int(h * 0.030)), bold=True)
+    text = "36"
+    tw = _text_w(text, f); th = f.getbbox("Ag")[3]
+    disc = int(th * 0.82)
+    box_w = tw + 4 + disc; box_h = th + 6
+    x, y = _anchor_box("mosca_esquina_dcha", w, h, box_w, box_h)
     draw.text((x + 2, y + 2), text, font=f, fill=(0, 0, 0, 130))
     draw.text((x, y), text, font=f, fill=_BLANCO)
+    dx = x + tw + 4; dy = y + (th - disc) // 2
+    draw.ellipse([dx, dy, dx + disc, dy + disc], fill=_BLANCO)
+    return img
 
+
+def _render_canal(el: GrafismoElemento, w: int, h: int) -> Image.Image:
+    """Channel mark 'La 1' (rendered as a bold '1')."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0)); draw = ImageDraw.Draw(img)
+    f = _load_font(max(24, int(h * 0.044)), bold=True)
+    text = "1"
+    box_w = _text_w(text, f) + 6; box_h = f.getbbox("Ag")[3] + 6
+    x, y = _anchor_box(el.ancla or "canal_esquina_dcha", w, h, box_w, box_h)
+    draw.text((x + 2, y + 2), text, font=f, fill=(0, 0, 0, 130))
+    draw.text((x, y), text, font=f, fill=_BLANCO)
     return img
 
 
 def _render_element(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    if el.tipo == "titular":
+    if el.tipo in ("cintillo", "titular"):
         return _render_cintillo(el, w, h)
     if el.tipo == "rotulo_persona":
         return _render_lower_third(el, w, h)
     if el.tipo == "rotulo_persona_simultaneo":
-        return _render_lower_third_simultaneo(el, w, h)
+        # Render the same as a normal rótulo (bottom-right, new style). The old
+        # left-anchored "simultaneo" layout collided with the new left cintillo.
+        return _render_lower_third(el, w, h)
     if el.tipo == "dato":
         return _render_dato(el, w, h)
     if el.tipo == "pie_pagina":
         return _render_crawl(el, w, h)
     if el.tipo == "frase_clave":
         return _render_frase_clave(el, w, h)
+    if el.tipo == "directo":
+        return _render_directo(el, w, h)
+    if el.tipo == "contacto":
+        return _render_contacto(el, w, h)
+    if el.tipo == "reloj":
+        return _render_reloj(el, w, h)
+    if el.tipo == "mosca":
+        return _render_mosca(w, h)
+    if el.tipo == "canal":
+        return _render_canal(el, w, h)
     return Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
 
@@ -427,6 +566,45 @@ async def _get_video_dimensions(ffprobe: str, video_path: Path) -> tuple[int, in
         return 1280, 720
 
 
+_FADE_S = 0.4   # entrance/exit fade duration (seconds)
+
+
+def _build_overlay_filter(elementos: list[GrafismoElemento]) -> tuple[list[int], str]:
+    """Build the filter_complex for the visible elements. Each element's PNG input
+    is looped to span [0, t1]; its alpha fades in at t0 and out ending at t1, so the
+    overlay needs NO enable= clause (alpha gates visibility, and the input's t-clock
+    equals the output t-clock since both start at 0). Returns (visible_indices, filter).
+    Input numbering: [0:v] is the base video; visible element k is input [k+1:v].
+    """
+    visible = [i for i, el in enumerate(elementos) if el.visible]
+    parts: list[str] = []
+    prev = "0:v"
+    for k, idx in enumerate(visible):
+        el = elementos[idx]
+        t0 = el.tiempo_inicio
+        t1 = t0 + el.duracion
+        fade = min(_FADE_S, max(0.05, el.duracion / 2))
+        parts.append(
+            f"[{k + 1}:v]format=yuva420p,"
+            f"fade=t=in:st={t0:.2f}:d={fade:.2f}:alpha=1,"
+            f"fade=t=out:st={t1 - fade:.2f}:d={fade:.2f}:alpha=1[g{k}]"
+        )
+        out = f"v{k + 1}"
+        parts.append(f"[{prev}][g{k}]overlay=0:0[{out}]")
+        prev = out
+    parts.append(f"[{prev}]copy[vout]")
+    return visible, ";".join(parts)
+
+
+def _overlay_input_args(el: GrafismoElemento, png: Path) -> list[str]:
+    """FFmpeg input args for one overlay PNG. The image is looped past its t1 by
+    a fade tail so the alpha fade-out fully completes in transparent frames before
+    EOF — otherwise overlay's eof_action=repeat freezes the last (still partly
+    visible) frame and the grafismo never finishes hiding."""
+    end = el.tiempo_inicio + el.duracion + _FADE_S
+    return ["-loop", "1", "-t", f"{end:.2f}", "-i", str(png)]
+
+
 # ---------------------------------------------------------------------------
 # Core apply function
 # ---------------------------------------------------------------------------
@@ -442,40 +620,19 @@ async def _apply_grafismos(
     w, h = await _get_video_dimensions(ffprobe, input_path)
     loop = asyncio.get_running_loop()
 
-    # 1. Render each element as RGBA PNG at video resolution
-    rendered: list[tuple[GrafismoElemento, Path]] = []
-    for i, el in enumerate(elementos):
-        png = tmpdir / f"el_{i:03d}.png"
-        img = await loop.run_in_executor(None, _render_element, el, w, h)
+    visible, filter_complex = _build_overlay_filter(elementos)
+
+    # Render each VISIBLE element as a PNG (in input order)
+    rendered: list[Path] = []
+    for k, idx in enumerate(visible):
+        png = tmpdir / f"el_{k:03d}.png"
+        img = await loop.run_in_executor(None, _render_element, elementos[idx], w, h)
         img.save(str(png), "PNG")
-        rendered.append((el, png))
+        rendered.append(png)
 
-    # 2. Mosca always on top
-    mosca_png = tmpdir / "mosca.png"
-    mosca_img = await loop.run_in_executor(None, _render_mosca, w, h)
-    mosca_img.save(str(mosca_png), "PNG")
-
-    # 3. Build filter_complex
-    filter_parts: list[str] = []
-    prev = "0:v"
-    for i, (el, _) in enumerate(rendered):
-        t0 = el.tiempo_inicio
-        t1 = t0 + el.duracion
-        out = f"v{i + 1}"
-        filter_parts.append(
-            f"[{prev}][{i + 1}:v]overlay=0:0:enable='between(t,{t0},{t1})'[{out}]"
-        )
-        prev = out
-
-    mosca_idx = len(rendered) + 1
-    filter_parts.append(f"[{prev}][{mosca_idx}:v]overlay=0:0[vout]")
-    filter_complex = ";".join(filter_parts)
-
-    # 4. FFmpeg command
     inputs: list[str] = ["-i", str(input_path)]
-    for _, png in rendered:
-        inputs += ["-i", str(png)]
-    inputs += ["-i", str(mosca_png)]
+    for k, idx in enumerate(visible):
+        inputs += _overlay_input_args(elementos[idx], rendered[k])
 
     cmd = (
         [ffmpeg, "-y"]
@@ -532,7 +689,7 @@ async def aplicar_grafismos(body: GrafismoRequest) -> dict:
         "ok": True,
         "video_key": output_key,
         "video_url": f"/api/grafismo/video/{output_key}",
-        "grafismos_aplicados": len(body.elementos),
+        "grafismos_aplicados": sum(1 for e in body.elementos if e.visible),
         "fps_salida": 25,
         "motor": "pillow+overlay",
     }

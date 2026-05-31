@@ -556,9 +556,12 @@ def _scored_segments_to_plan(
     segs: list[dict] = []
     n = len(scored_segments)
     cintillo_grafismo = {
-        "tipo": "titular",
-        "texto_principal": f"{cintillo_label} — {titular[:50]}",
-        "texto_secundario": "",
+        "tipo": "titular",                           # stays "titular" so _TIMING_RULES match; renders as stepped cintillo
+        "texto_principal": titular[:120],            # title band
+        "texto_secundario": "",                      # paragraph filled by the route (entradilla) in Task 8
+        "etiqueta": cintillo_label,                  # optional red tag
+        "obligatorio": True,
+        "ancla": "cintillo_abajo_izq",
     }
 
     _DECLARACION_ONLY = {"total", "teaser", "promo"}
@@ -599,6 +602,8 @@ def _scored_segments_to_plan(
                     "tipo": "rotulo_persona",
                     "texto_principal": nombre,
                     "texto_secundario": cargo,
+                    "obligatorio": False,
+                    "ancla": "rotulo_abajo_dcha",
                 })
 
         segs.append({
@@ -609,6 +614,13 @@ def _scored_segments_to_plan(
             "tipo": tipo,
             "grafismos": grafismos,
         })
+
+    # Mandatory cintillo: ensure the first segment carries one (title+paragraph always shown).
+    has_cintillo = any(
+        g.get("tipo") == "titular" for s in segs for g in s.get("grafismos", [])
+    )
+    if segs and not has_cintillo:
+        segs[0].setdefault("grafismos", []).insert(0, dict(cintillo_grafismo))
 
     return {
         "titulo_cintillo": f"{cintillo_label} — {titular[:55]}",

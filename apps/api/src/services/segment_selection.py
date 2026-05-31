@@ -75,12 +75,13 @@ def _build_per_frame_segments(
     for f in sorted(candidates, key=lambda f: f["timestamp_s"]):
         ts = f["timestamp_s"]
         segs.append({
-            "t_start":   max(0.0, ts - 1.5),
-            "t_end":     ts + clip_s - 1.5,
+            "t_start": max(0.0, ts - 1.5),
+            "t_end": ts + clip_s - 1.5,
             "max_score": f.get("puntuacion", 0),
-            "hablante":  f.get("hablante", "plano_sala"),
-            "cargo":     f.get("cargo_inferido") or "",
-            "razon":     f.get("razon_puntuacion", ""),
+            "hablante": f.get("hablante", "plano_sala"),
+            "cargo": f.get("cargo_inferido") or "",
+            "razon": f.get("razon_puntuacion", ""),
+            "fuente_index": f.get("fuente_index", 0),
         })
     return segs
 
@@ -136,12 +137,15 @@ def _build_sentence_segments(
             "hablante": f.get("hablante", "plano_sala"),
             "cargo": f.get("cargo_inferido") or "",
             "razon": f.get("razon_puntuacion", ""),
+            "fuente_index": f.get("fuente_index", 0),
         })
     # Two frames inside the same sentence collapse to identical spans — keep the
-    # highest-scoring one rather than emitting duplicates.
-    unique: dict[tuple[float, float], dict] = {}
+    # highest-scoring one rather than emitting duplicates.  The dedup key
+    # includes fuente_index so multi-source frames on the same sentence span are
+    # preserved as distinct clips.
+    unique: dict[tuple[int, float, float], dict] = {}
     for s in segs:
-        key = (s["t_start"], s["t_end"])
+        key = (s["fuente_index"], s["t_start"], s["t_end"])
         if key not in unique or s["max_score"] > unique[key]["max_score"]:
             unique[key] = s
     return sorted(unique.values(), key=lambda s: s["t_start"])
@@ -151,7 +155,13 @@ def _build_merged_segments(
     candidates: list[dict],
     max_segment_s: float,
 ) -> list[dict]:
-    """Merge nearby speaker frames into soundbite windows (vtr/nota)."""
+    """Merge nearby speaker frames into soundbite windows (vtr/nota).
+
+    Only reached for piece types absent from _TYPE_CONFIG (per_frame=False); the
+    configured types never use it. The merge keeps the first frame's fuente_index
+    for a window and does not update it across a merge, so this builder is not
+    source-correct for multi-source input — acceptable while it stays unreachable
+    for real piece types (see the multi-source colas spec)."""
     segments: list[dict] = []
     current: dict | None = None
 
@@ -167,6 +177,7 @@ def _build_merged_segments(
                 "hablante":  frame.get("hablante", "desconocido"),
                 "cargo":     frame.get("cargo_inferido") or "",
                 "razon":     frame.get("razon_puntuacion", ""),
+                "fuente_index": frame.get("fuente_index", 0),
             }
         elif ts - current["t_end"] < _MERGE_GAP_S:
             current["t_end"] = ts + 8.0
@@ -184,6 +195,7 @@ def _build_merged_segments(
                 "hablante":  frame.get("hablante", "desconocido"),
                 "cargo":     frame.get("cargo_inferido") or "",
                 "razon":     frame.get("razon_puntuacion", ""),
+                "fuente_index": frame.get("fuente_index", 0),
             }
 
     if current:
@@ -195,6 +207,17 @@ def _build_merged_segments(
             seg["t_end"] = seg["t_start"] + max_segment_s
 
     return segments
+
+
+def _overlaps(a: dict, b: dict) -> bool:
+    """Two segments overlap only if they come from the same source AND their
+    time ranges intersect. Clips from different sources share a 0-based timeline
+    but are independent footage, so they never block each other."""
+    return (
+        a.get("fuente_index", 0) == b.get("fuente_index", 0)
+        and a["t_start"] < b["t_end"]
+        and a["t_end"] > b["t_start"]
+    )
 
 
 def _select_non_overlapping(
@@ -212,10 +235,7 @@ def _select_non_overlapping(
     for seg in by_score:
         if max_segs is not None and len(selected) >= max_segs:
             break
-        overlaps = any(
-            seg["t_start"] < sel["t_end"] and seg["t_end"] > sel["t_start"]
-            for sel in selected
-        )
+        overlaps = any(_overlaps(seg, sel) for sel in selected)
         if overlaps:
             continue
         dur = seg["t_end"] - seg["t_start"]
@@ -263,7 +283,7 @@ def _select_recurso(
         nonlocal total
         if max_segs is not None and len(selected) >= max_segs:
             return
-        if any(seg["t_start"] < s["t_end"] and seg["t_end"] > s["t_start"] for s in selected):
+        if any(_overlaps(seg, s) for s in selected):
             return
         dur = seg["t_end"] - seg["t_start"]
         if total + dur > target_duration * 1.05:
@@ -334,6 +354,7 @@ def select_segments(
     min_segment_s: float = 5.0,
     max_segment_s: float = 12.0,
     tipo_pieza: str = "vtr",
+    n_fuentes: int = 1,
 ) -> list[dict]:
     """Select the best segments from journalistic-scored frames.
 
@@ -367,7 +388,15 @@ def select_segments(
     # Step B — build candidate segments
     # Speech/declaration types align cuts to whole sentences when a transcript
     # is available; everything else keeps the fixed-window / merged behaviour.
-    units = build_sentence_units(words or []) if tipo_pieza in _SPEECH_TYPES else []
+    # Multi-source speech: the flattened transcript timeline is non-monotonic
+    # across sources, so sentence alignment is unreliable — fall back to the
+    # per-frame builder (per_frame=True for all speech types). Single-source
+    # speech keeps sentence alignment.
+    units = (
+        build_sentence_units(words or [])
+        if tipo_pieza in _SPEECH_TYPES and n_fuentes < 2
+        else []
+    )
     if units:
         segments = _build_sentence_segments(candidates, units, clip_s, max_segment_s)
     elif per_frame:

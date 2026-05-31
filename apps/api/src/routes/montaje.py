@@ -23,6 +23,12 @@ router = APIRouter(prefix="/api/montaje", tags=["montaje"])
 _STORAGE_BASE = Path("data/storage")
 _OUTPUT_DIR = _STORAGE_BASE / "output" / "montajes"
 _W, _H = 1280, 720
+_TRANSITION_S = 0.4   # crossfade duration between clips (seconds), nota only for now
+
+
+def _transition_for(tipo_pieza: str) -> float:
+    """Crossfade duration to use for a piece type. Only `nota` gets transitions for now."""
+    return _TRANSITION_S if tipo_pieza == "nota" else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +146,71 @@ async def _concat(clip_paths: list[Path], out: Path) -> None:
         raise RuntimeError(f"Concat failed: {stderr.decode()[-300:]}")
 
 
+async def _concat_xfade(
+    clip_paths: list[Path], durations: list[float], transition_s: float,
+    out: Path, mute: bool = False,
+) -> None:
+    """Join clips with a crossfade (xfade video + acrossfade audio) in one re-encode."""
+    filter_complex = _build_xfade_filter(durations, transition_s, mute=mute)
+    if not filter_complex:
+        raise RuntimeError("_concat_xfade requires >=2 clips and transition_s > 0")
+    inputs: list[str] = []
+    for p in clip_paths:
+        inputs += ["-i", str(p)]
+    maps = ["-map", "[vout]"]
+    if not mute:
+        maps += ["-map", "[aout]"]
+    cmd = (
+        [_ffmpeg(), "-y", *inputs, "-filter_complex", filter_complex, *maps,
+         "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+    )
+    if not mute:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    cmd += ["-movflags", "+faststart", str(out)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Crossfade concat failed: {stderr.decode()[-300:]}")
+
+
+def _build_xfade_filter(durations: list[float], transition_s: float, mute: bool = False) -> str:
+    """filter_complex to join N normalised clips with a crossfade: chained `xfade`
+    on video (cumulative offsets) + chained `acrossfade` on audio (same duration, so
+    audio and video shrink in lockstep). Each input is first normalised
+    (fps/format/sar/timebase) so xfade never errors on edge-case source metadata.
+    Returns "" when there is nothing to crossfade (caller falls back to plain concat).
+    """
+    n = len(durations)
+    if n < 2 or transition_s <= 0:
+        return ""
+    t = min(transition_s, min(durations) / 2)   # never exceed half the shortest clip
+
+    parts: list[str] = []
+    for i in range(n):
+        parts.append(f"[{i}:v]fps=25,format=yuv420p,setsar=1,settb=AVTB[s{i}]")
+
+    prev, running = "s0", durations[0]
+    for j in range(1, n):
+        out = "vout" if j == n - 1 else f"vx{j}"
+        offset = running - t
+        parts.append(
+            f"[{prev}][s{j}]xfade=transition=fade:duration={t:.2f}:offset={offset:.2f}[{out}]"
+        )
+        prev, running = out, running + durations[j] - t
+
+    if not mute:
+        aprev = "0:a"
+        for j in range(1, n):
+            out = "aout" if j == n - 1 else f"ax{j}"
+            parts.append(f"[{aprev}][{j}:a]acrossfade=d={t:.2f}[{out}]")
+            aprev = out
+
+    return ";".join(parts)
+
+
 async def _loop_to_duration(source: Path, target: float, out: Path) -> None:
     """Re-encode looping the source until it reaches target duration."""
     cmd = [
@@ -243,6 +314,7 @@ async def ensamblar(
     duracion_objetivo: int | None = None,
     normalize_audio: bool = True,
     mute_clips: bool = False,
+    transition_s: float = 0.0,
 ) -> tuple[str, float, bool]:
     """Assemble clips and return (video_key, duration_seconds, material_en_loop).
 
@@ -282,6 +354,9 @@ async def ensamblar(
 
         if len(clip_paths) == 1:
             clip_paths[0].rename(out_path)
+        elif transition_s > 0:
+            durations = [await _get_duration(c) for c in clip_paths]
+            await _concat_xfade(clip_paths, durations, transition_s, out_path, mute=mute_clips)
         else:
             await _concat(clip_paths, out_path)
 
