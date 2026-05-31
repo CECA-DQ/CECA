@@ -6,6 +6,7 @@ generates a TTS voiceover, and delegates final assembly to montaje.ensamblar().
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -135,6 +136,67 @@ def _snap_segment_boundaries(
     return plan_segs
 
 _STORAGE_BASE = Path("data/storage")
+
+
+def _is_url(s: str) -> bool:
+    """A fuente entry that must be downloaded rather than read from storage."""
+    return s.startswith(("http://", "https://"))
+
+
+def _storage_key_for(path: Path) -> str:
+    """Storage key (relative to _STORAGE_BASE) for a resolved source path, so a
+    montage clip can be routed back to its file. A downloaded URL maps to the
+    cached file's key (e.g. ``videos/src_<hash>.mp4``), never the original URL."""
+    return str(path.resolve().relative_to(_STORAGE_BASE.resolve()))
+
+
+async def _download_fuente(url: str, ffmpeg: str) -> Path:
+    """Download a URL fuente into data/storage and return its path.
+
+    Content-addressed by a hash of the URL so the same video is not
+    re-downloaded across endpoints (analizar-material → pieza-emision) or across
+    retries. Direct media URLs use ffmpeg; everything else (YouTube, etc.) uses
+    yt-dlp — the same download path used for the single `url` field.
+    """
+    videos_dir = _STORAGE_BASE / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    out_path = videos_dir / f"src_{hashlib.sha1(url.encode()).hexdigest()[:12]}.mp4"
+    if out_path.exists():
+        return out_path  # already downloaded
+
+    if _is_direct_url(url):
+        await _ffmpeg_download(url, out_path, ffmpeg)
+    else:
+        if not shutil.which("yt-dlp"):
+            raise HTTPException(status_code=500, detail="yt-dlp no está instalado")
+        await _ytdlp_download(url, out_path)
+
+    if not out_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="La descarga finalizó pero no se encontró el fichero",
+        )
+    return out_path
+
+
+async def _resolve_fuentes(fuentes: list[str], ffmpeg: str) -> list[Path]:
+    """Resolve each fuente to a local path. http(s) URLs are downloaded
+    (yt-dlp / ffmpeg); every other entry is a storage key under data/storage.
+    Raises 404 for a missing storage key, 422 for a failed download.
+    """
+    sources: list[Path] = []
+    for key in fuentes:
+        if _is_url(key):
+            try:
+                sources.append(await _download_fuente(key, ffmpeg))
+            except RuntimeError as exc:
+                raise HTTPException(status_code=422, detail=f"Descarga fallida ({key}): {exc}")
+        else:
+            p = (_STORAGE_BASE / key).resolve()
+            if not p.exists():
+                raise HTTPException(status_code=404, detail=f"Fuente no encontrada: {key}")
+            sources.append(p)
+    return sources
 
 # ---------------------------------------------------------------------------
 # Editorial analysis prompts
@@ -557,12 +619,11 @@ async def pieza_emision(
     quiere_locucion = body.incluir_locucion and piece_cfg["con_locucion"]
 
     # ── PASO 1: Transcribir fuentes + análisis visual en paralelo ─────────────
-    sources: list[Path] = []
-    for key in body.fuentes:
-        p = (_STORAGE_BASE / key).resolve()
-        if not p.exists():
-            raise HTTPException(status_code=404, detail=f"Source not found: {key}")
-        sources.append(p)
+    # fuentes may be storage keys or http(s) URLs (downloaded on the fly).
+    sources = await _resolve_fuentes(body.fuentes, ffmpeg)
+    # Storage key per source, used to route each montage clip back to its file.
+    # For a downloaded URL this is the cached file's key, not the original URL.
+    fuente_keys = [_storage_key_for(p) for p in sources]
 
     # Get durations for visual analysis frame budgeting
     source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
@@ -728,10 +789,10 @@ async def pieza_emision(
     base_segs: list[SegmentoMontaje] = []
     for i, seg in enumerate(plan_segmentos):
         idx = int(seg.get("fuente_index", 0))
-        if idx >= len(body.fuentes):
+        if idx >= len(fuente_keys):
             idx = 0
         base_segs.append(SegmentoMontaje(
-            storage_key=body.fuentes[idx],
+            storage_key=fuente_keys[idx],
             tiempo_inicio=float(seg.get("tiempo_inicio", 0)),
             tiempo_fin=float(seg.get("tiempo_fin", 10)),
             tipo=seg.get("tipo", "broll"),
@@ -1013,13 +1074,8 @@ async def analizar_material(
         url_storage_key = f"videos/{out_path.name}"
         fuentes.append(url_storage_key)
 
-    # ── Resolver paths ────────────────────────────────────────────────────────
-    sources: list[Path] = []
-    for key in fuentes:
-        p = (_STORAGE_BASE / key).resolve()
-        if not p.exists():
-            raise HTTPException(status_code=404, detail=f"Fuente no encontrada: {key}")
-        sources.append(p)
+    # ── Resolver paths (storage keys + http(s) URLs) ──────────────────────────
+    sources = await _resolve_fuentes(fuentes, ffmpeg)
 
     # ── Transcripción + análisis visual en paralelo ───────────────────────────
     source_durations = await asyncio.gather(*[_get_duration(src) for src in sources])
