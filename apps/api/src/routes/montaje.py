@@ -79,15 +79,18 @@ async def _get_duration(path: Path) -> float:
         return 0.0
 
 
-async def _normalizar_clip(source: Path, t_start: float, t_end: float | None, out: Path) -> None:
-    """Cut and re-encode to 1280x720 h264/aac so all clips are concat-compatible."""
+def _normalize_cmd(
+    ffmpeg: str, source: Path, t_start: float, t_end: float | None,
+    out: Path, mute: bool = False,
+) -> list[str]:
+    """Build the ffmpeg cut/re-encode command. When mute, drop the audio stream."""
     vf = (
         f"scale={_W}:{_H}:force_original_aspect_ratio=decrease,"
         f"pad={_W}:{_H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
     )
     # Use -t (duration) not -to (end time): more reliable with fast seek because
     # keyframe alignment can leave a short audio tail with -to.
-    cmd = [_ffmpeg(), "-y", "-ss", str(t_start)]
+    cmd = [ffmpeg, "-y", "-ss", str(t_start)]
     if t_end is not None:
         cmd += ["-t", str(round(t_end - t_start, 3))]
     cmd += [
@@ -95,10 +98,20 @@ async def _normalizar_clip(source: Path, t_start: float, t_end: float | None, ou
         "-vf", vf,
         "-r", "25", "-vsync", "cfr", "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-        "-movflags", "+faststart",
-        str(out),
     ]
+    if mute:
+        cmd += ["-an"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    cmd += ["-movflags", "+faststart", str(out)]
+    return cmd
+
+
+async def _normalizar_clip(
+    source: Path, t_start: float, t_end: float | None, out: Path, mute: bool = False,
+) -> None:
+    """Cut and re-encode to 1280x720 h264/aac so all clips are concat-compatible."""
+    cmd = _normalize_cmd(_ffmpeg(), source, t_start, t_end, out, mute=mute)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
@@ -229,8 +242,13 @@ async def ensamblar(
     output_key: str | None = None,
     duracion_objetivo: int | None = None,
     normalize_audio: bool = True,
+    mute_clips: bool = False,
 ) -> tuple[str, float, bool]:
-    """Assemble clips and return (video_key, duration_seconds, material_en_loop)."""
+    """Assemble clips and return (video_key, duration_seconds, material_en_loop).
+
+    mute_clips applies to ALL clips uniformly (no partial muting) and is mutually
+    exclusive with audio_voiceover_key.
+    """
     if not segmentos:
         raise HTTPException(status_code=422, detail="At least one segment is required")
 
@@ -254,7 +272,7 @@ async def ensamblar(
         clip_paths: list[Path] = []
         for i, (seg, src) in enumerate(zip(ordered, sources)):
             clip = work_dir / f"clip_{i:03d}.mp4"
-            await _normalizar_clip(src, seg.tiempo_inicio, seg.tiempo_fin, clip)
+            await _normalizar_clip(src, seg.tiempo_inicio, seg.tiempo_fin, clip, mute=mute_clips)
             clip_paths.append(clip)
 
         # 2. Concatenate
@@ -281,8 +299,9 @@ async def ensamblar(
             material_en_loop = True
             duration = await _get_duration(out_path)
 
-        # 4. Mix voiceover if provided
-        if audio_voiceover_key:
+        # 4. Mix voiceover if provided (skip for muted clips — they have no audio
+        #    stream to mix into; mute_clips and a voiceover are mutually exclusive).
+        if audio_voiceover_key and not mute_clips:
             audio_path = (_STORAGE_BASE / audio_voiceover_key).resolve()
             if audio_path.exists():
                 mixed = out_path.with_stem(out_path.stem + "_mixed")

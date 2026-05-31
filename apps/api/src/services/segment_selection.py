@@ -23,6 +23,8 @@ _SILENCE_WINDOW         = 0.5
 _MIN_SILENCE_GAP        = 0.35
 _TURN_GAP_S             = 1.0    # transcript gap that likely marks a speaker turn; stop expanding
 _SPEECH_TYPES           = {"total", "teaser", "promo", "vtr", "nota", "highlights"}
+_RECURSO_TYPES          = {"cola", "broll"}   # b-roll recurso, no narration → recurso frames, muted
+_RECURSO_MAX_SCORE      = 4               # Gemini band 1-4 = listening / wide / no active speech
 
 # Per-type selection config
 # per_frame=True  → one clip per sampled frame (no merging); all types now use this
@@ -32,7 +34,7 @@ _TYPE_CONFIG: dict[str, dict] = {
     "teaser":     {"min_score": 6,  "max_segs": 2,    "clip_s":   7.0, "per_frame": True},
     "promo":      {"min_score": 4,  "max_segs": 4,    "clip_s":   5.0, "per_frame": True},
     "highlights": {"min_score": 5,  "max_segs": None, "clip_s":  10.0, "per_frame": True},
-    "cola":       {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
+    "cola":       {"min_score": 1,  "max_segs": None, "clip_s":   5.0, "per_frame": True},
     "broll":      {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
     "off":        {"min_score": 1,  "max_segs": None, "clip_s":   8.0, "per_frame": True},
     "vtr":        {"min_score": 5,  "max_segs": None, "clip_s":  12.0, "per_frame": True},
@@ -223,6 +225,70 @@ def _select_non_overlapping(
     return sorted(selected, key=lambda s: s["t_start"])
 
 
+def _select_recurso(
+    segments: list[dict],
+    target_duration: float,
+    max_segs: int | None,
+) -> list[dict]:
+    """Select clips for cola/broll, spread across the timeline. Prefers recurso
+    (non-speaker / low-score) frames, then tops up with the remaining frames —
+    also spread — to fill the target, so a low-recurso source still yields several
+    distinct takes instead of a single looped clip. cola/broll are rendered muted,
+    so the topped-up speaker frames carry no audio."""
+    def _is_recurso(s: dict) -> bool:
+        return (
+            s.get("hablante", "") in ("plano_sala", "desconocido", "")
+            or s.get("max_score", 0) <= _RECURSO_MAX_SCORE
+        )
+
+    def _spread(clips: list[dict], budget: float) -> list[dict]:
+        """Evenly sample clips across the timeline so the picks are distributed,
+        not clustered at the start."""
+        if not clips:
+            return clips
+        avg_dur = sum(c["t_end"] - c["t_start"] for c in clips) / len(clips)
+        n_target = max(1, int(budget / max(avg_dur, 1.0)))
+        if len(clips) <= n_target:
+            return clips
+        step = len(clips) / n_target
+        return [clips[int(i * step)] for i in range(n_target)]
+
+    recurso = sorted((s for s in segments if _is_recurso(s)), key=lambda s: s["t_start"])
+    fallback = sorted((s for s in segments if not _is_recurso(s)), key=lambda s: s["t_start"])
+
+    selected: list[dict] = []
+    total = 0.0
+
+    def _try_add(seg: dict) -> None:
+        nonlocal total
+        if max_segs is not None and len(selected) >= max_segs:
+            return
+        if any(seg["t_start"] < s["t_end"] and seg["t_end"] > s["t_start"] for s in selected):
+            return
+        dur = seg["t_end"] - seg["t_start"]
+        if total + dur > target_duration * 1.05:
+            return
+        selected.append(seg)
+        total += dur
+
+    # Recurso first (preferred), spread across the timeline.
+    for seg in _spread(recurso, target_duration):
+        _try_add(seg)
+    # Top up with the remaining (muted) frames — also spread — to fill the target
+    # so a low-recurso source yields several distinct takes, never a single loop.
+    if total < target_duration:
+        for seg in _spread(fallback, target_duration - total):
+            _try_add(seg)
+
+    if segments and not selected:
+        logger.warning(
+            "_select_recurso: selected 0 clips from %d segments (target %.1fs)",
+            len(segments), target_duration,
+        )
+
+    return sorted(selected, key=lambda s: s["t_start"])
+
+
 def _select_for_total(
     segments: list[dict],
     target_duration: float,
@@ -325,7 +391,12 @@ def select_segments(
     elif tipo_pieza in ("vtr", "nota"):
         # 12s clips from 5s-interval frames overlap heavily — enforce no overlap
         result = _select_non_overlapping(segments, target_duration, max_segs)
+    elif tipo_pieza in _RECURSO_TYPES:
+        result = _select_recurso(segments, target_duration, max_segs)
     else:
+        # teaser / promo / off → score-descending fill. NOTE: off is editorially recurso
+        # (narrated b-roll) and should later use recurso selection too, but it carries a
+        # voiceover (separate audio handling) and is deferred — see the cola spec.
         # Sort by score, fill up to target duration, respect max_segs
         by_score = sorted(segments, key=lambda s: s["max_score"], reverse=True)
         selected: list[dict] = []
