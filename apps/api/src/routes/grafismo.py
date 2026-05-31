@@ -37,6 +37,13 @@ _BLANCO       = (255, 255, 255, 255)
 _BLANCO_SEC   = (203, 213, 225, 255)   # #CBD5E1 secondary / cargo text
 _GRIS_CRAWL   = (148, 163, 184, 255)   # #94A3B8 ticker text
 
+# Reference broadcaster palette (approx; sample exact hex from the reference image)
+_ROJO_TAG      = (209,  46,  46, 255)   # #d12e2e  ÚLTIMA HORA tag
+_NEGRO_BANDA   = ( 17,  17,  17, 255)   # #111111  title band bg
+_TEXTO_PARRAFO = ( 26,  26,  26, 255)   # #1a1a1a  paragraph text
+_AZUL_CARGO    = ( 31, 111, 178, 255)   # #1f6fb2  default role bar
+_GAP           = 6                      # gap between cintillo blocks
+
 # Broadcast safe margins
 _LEFT_SAFE     = 80
 _RIGHT_MARGIN  = 80
@@ -213,53 +220,47 @@ def _fit_lines(text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines: i
 # ---------------------------------------------------------------------------
 
 def _render_cintillo(el: GrafismoElemento, w: int, h: int) -> Image.Image:
-    """Cintillo inferior M360: navy band + orange label box + headline (up to 2 lines)."""
+    """Stepped cintillo: optional inline red tag → black title band (white text)
+    → white paragraph band (black text). Anchored bottom-left, inside safe area."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    raw = el.texto_principal
-    if " — " in raw:
-        label, titulo = raw.split(" — ", 1)
-    elif " - " in raw:
-        label, titulo = raw.split(" - ", 1)
-    else:
-        label, titulo = "INFO", raw
+    band_w = int(w * 0.55)                       # cintillo width
+    f_tag   = _load_font(max(11, int(h * 0.018)), bold=True)
+    f_title = _load_font(max(15, int(h * 0.026)), bold=True)
+    f_par   = _load_font(max(12, int(h * 0.020)), bold=False)
+    pad = 12
 
-    label  = label.strip().upper()[:20]
-    titulo = titulo.strip()
+    title = el.texto_principal.strip()
+    par   = el.texto_secundario.strip()
+    tag   = el.etiqueta.strip().upper()
 
-    f_label  = _load_font(20, bold=True)
-    f_titulo = _load_font(21, bold=True)
-    f_sub    = _load_font(16, bold=False)
+    title_lines = _fit_lines(title, f_title, band_w - 2 * pad, max_lines=2)
+    par_lines   = _fit_lines(par,   f_par,   band_w - 2 * pad, max_lines=2)
+    line_h_t = f_title.getbbox("Ag")[3] + 6
+    line_h_p = f_par.getbbox("Ag")[3] + 6
+    tag_h    = (f_tag.getbbox("Ag")[3] + 10) if tag else 0
+    title_h  = len(title_lines) * line_h_t + 2 * pad
+    par_h    = len(par_lines) * line_h_p + 2 * pad
+    total_h  = tag_h + (_GAP if tag else 0) + title_h + _GAP + par_h
 
-    # Full-width navy background band
-    band_y = h - _CINTILLO_BAND_H
-    draw.rectangle([0, band_y, w, h], fill=_NAVY_BANDA)
+    x, y = _anchor_box("cintillo_abajo_izq", w, h, band_w, total_h)
+    cur_y = y
 
-    # Orange label box
-    lbbox = f_label.getbbox(label)
-    lbl_w = lbbox[2] - lbbox[0] + 24
-    box_x = _LEFT_SAFE
-    box_y = h - 78
-    box_h = 40
-    draw.rectangle([box_x, box_y, box_x + lbl_w, box_y + box_h], fill=_NARANJA)
-    draw.text((box_x + 12, box_y + 10), label, font=f_label, fill=_BLANCO)
+    if tag:
+        tag_w = _text_w(tag, f_tag) + 18
+        draw.rectangle([x, cur_y, x + tag_w, cur_y + tag_h], fill=_ROJO_TAG)
+        draw.text((x + 9, cur_y + 5), tag, font=f_tag, fill=_BLANCO)
+        cur_y += tag_h + _GAP
 
-    # White vertical divider
-    div_x = box_x + lbl_w + 8
-    draw.rectangle([div_x, box_y, div_x + 2, box_y + box_h], fill=(255, 255, 255, 160))
+    draw.rectangle([x, cur_y, x + band_w, cur_y + title_h], fill=_NEGRO_BANDA)
+    for i, line in enumerate(title_lines):
+        draw.text((x + pad, cur_y + pad + i * line_h_t), line, font=f_title, fill=_BLANCO)
+    cur_y += title_h + _GAP
 
-    # Headline — wrap into up to 2 lines
-    text_x = div_x + 14
-    max_text_w = w - text_x - _RIGHT_MARGIN
-    lines = _wrap_text(titulo, f_titulo, max_text_w)
-    line_spacing = 22
-    for i, line in enumerate(lines[:2]):
-        draw.text((text_x, box_y + 5 + i * line_spacing), line, font=f_titulo, fill=_BLANCO)
-
-    # Optional subtitle
-    if el.texto_secundario:
-        draw.text((box_x, h - 20), el.texto_secundario.strip()[:90], font=f_sub, fill=_BLANCO_SEC)
+    draw.rectangle([x, cur_y, x + band_w, cur_y + par_h], fill=_BLANCO)
+    for i, line in enumerate(par_lines):
+        draw.text((x + pad, cur_y + pad + i * line_h_p), line, font=f_par, fill=_TEXTO_PARRAFO)
 
     return img
 

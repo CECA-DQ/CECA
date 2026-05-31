@@ -84,3 +84,33 @@ def test_fit_lines_overflow_last_line_fits_width():
     from src.routes.grafismo import _text_w
     out = _fit_lines("palabra " * 60, font, max_w=300, max_lines=2)
     assert _text_w(out[-1], font) <= 300
+
+
+from src.routes.grafismo import _render_cintillo
+
+
+def test_cintillo_renders_full_frame_rgba():
+    el = GrafismoElemento(
+        tipo="cintillo", texto_principal="El PP carga contra el Gobierno",
+        texto_secundario="Arremeten también contra Yolanda Díaz por el rescate a Plus Ultra",
+        tiempo_inicio=0.0, duracion=6.0, etiqueta="ÚLTIMA HORA", obligatorio=True,
+    )
+    img = _render_cintillo(el, 1280, 720)
+    assert img.size == (1280, 720)
+    assert img.mode == "RGBA"
+
+
+def test_cintillo_extreme_text_keeps_painted_pixels_in_safe_area():
+    el = GrafismoElemento(
+        tipo="cintillo",
+        texto_principal="Titular larguísimo " * 12,
+        texto_secundario="Subtítulo larguísimo que se repite muchas veces " * 6,
+        tiempo_inicio=0.0, duracion=6.0, etiqueta="ÚLTIMA HORA",
+    )
+    img = _render_cintillo(el, 1280, 720)
+    bbox = img.getbbox()  # bounding box of non-transparent pixels
+    assert bbox is not None
+    sx, sy = int(1280 * 0.05), int(720 * 0.05)
+    left, top, right, bottom = bbox
+    assert left >= sx - 1 and right <= 1280 - sx + 1
+    assert bottom <= 720 - sy + 1
