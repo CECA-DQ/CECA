@@ -58,13 +58,13 @@ The same plan drives both the front preview and the backend burn, so the editor 
 
 Extend `GrafismoElemento` (`grafismo.py`) — additive, backward-compatible:
 
-- `obligatorio: bool = False` — title/paragraph are `True`; rest `False`.
+- `obligatorio: bool = False` — the `cintillo` element (title+paragraph) is `True`; the rest `False`.
 - `visible: bool = True` — optional elements the user turned off are `False` (skipped at render).
-- `ancla: str` — preset anchor per type (e.g. `cintillo_abajo_izq`, `rotulo_abajo_dcha`, `mosca_esquina_dcha`, `contacto_arriba_izq`, `directo_centro`). Replaces the unused `posicion`.
+- `ancla: str = ""` — preset anchor per type (e.g. `cintillo_abajo_izq`, `rotulo_abajo_dcha`, `mosca_esquina_dcha`, `contacto_arriba_izq`, `directo_centro`). **Additive**; the legacy `posicion` field (default `"inferior"`, currently unused) stays for API compatibility and is ignored.
 - `color_barra: str = ""` — optional override for the rótulo role-bar color (default per template).
 - `anim: str = "fade"` — entrance/exit animation for the burned render.
 
-The plan is the existing per-segment `grafismos` list plus these fields; `_scored_segments_to_plan` and `_assign_grafismo_timings` set `obligatorio`/`ancla`/timing; the front may flip `visible`, change `ancla` (to another allowed preset), or edit the WhatsApp text before export.
+The plan is the existing per-segment `grafismos` list plus these fields; `_scored_segments_to_plan` and `_assign_grafismo_timings` set `obligatorio`/`ancla`/timing; the front may flip `visible`, change `ancla` (to another allowed preset), or edit the WhatsApp text before export. **`_plan_to_grafismos` (generar_pieza.py) must be extended to propagate `obligatorio`/`visible`/`ancla`/`color_barra` into the rendered `GrafismoEl`** — today it copies only tipo/textos/timing, so the new fields would be lost without this change.
 
 ## Catalog & style
 
@@ -80,20 +80,23 @@ The plan is the existing per-segment `grafismos` list plus these fields; `_score
 | Clock (black bg, white text, Madrid) | optional | corner, below `360` | static stamp |
 | `La 1` | optional | corner, right of `360`/clock | channel mark |
 
+The first three rows (red tag + title band + paragraph band) **compose a single `cintillo` grafismo** — one element carrying the title text, the paragraph text, and an optional `ÚLTIMA HORA` tag (a boolean + tag text on that element) — **not** three separate elements. The remaining rows are individual grafismos.
+
 Cross-cutting rules: replicate the reference palette (red `~#d12e2e`, black `#111`, white, role bar configurable, clock black/white); **title-safe clamp**; **text-fit** (2-line clamp + `…` / auto-shrink); small gap between the cintillo blocks (tag / title / paragraph). Exact hex values to be sampled from the reference image during implementation.
 
 ## Render changes (`src/routes/grafismo.py`)
 
 - Restyle the `_render_*` functions to the reference look; add renderers for the stepped cintillo (tag+title+paragraph as one composed unit), Directo, contact, clock, `360`, `La 1`.
 - Position each element from its **anchor preset** (a small table mapping `ancla` → coordinates within the safe area), instead of hardcoded per-type constants.
-- **Fade:** instead of (or in addition to) the hard `enable='between(t0,t1)'`, fade each overlay in/out with the FFmpeg `fade` filter on alpha (`format=yuva420p, fade=in:…:alpha=1, fade=out:…:alpha=1`) around its `[t0,t1]`. Fade duration is a small constant (e.g. ~0.4s), capped so it never exceeds the element's visible window.
+- **Fade:** fade each overlay in/out with the FFmpeg `fade` filter on alpha (`format=yuva420p, fade=in:…:alpha=1, fade=out:…:alpha=1`) around its `[t0,t1]`, replacing the hard `enable='between'` (or combined with it). Fade duration is a small constant (e.g. ~0.4s), capped so it never exceeds the element's window. **Implementation note:** today the PNG overlay inputs are single static frames with no temporal extent; the fade ramp needs the input timed — give each overlay image a bounded duration (`-loop 1` + `-t`, or trim) so `fade` can ramp over the window.
 - **Safe-area + text-fit:** every rendered box is clamped within the title-safe rectangle; text wraps to ≤2 lines with `…`, names/roles auto-fit their box.
+- **Mosca:** today `_render_mosca` is always-on and hardcoded ("360"); it becomes plan-driven optional elements (`360` with filled 0, clock, `La 1`), each rendered only when `visible`.
 - Mandatory elements always render; optional render only when `visible` and their content exists.
 - Clock text computed at render with `Europe/Madrid`.
 
 ## Coherence
 
-Text comes from analysis as today (titular, párrafo, nombre, cargo, localización). If the speaker isn't identified, the person rótulo is omitted (never a placeholder name). The mandatory cintillo always carries the generated title/paragraph. Applies to **cola** and **nota** alike — both already receive a plan; the restyle and the mandatory/optional rules apply to both.
+Text comes from analysis as today. Specifically: the mandatory **title band** = the generated headline (the piece's `titular`); the mandatory **paragraph band** = the generated summary (`entradilla`/`cuerpo`); the optional rótulo's name/role and the Directo location come from speaker + visual analysis. If the speaker isn't identified, the person rótulo is omitted (never a placeholder name). The mandatory cintillo always carries the generated title/paragraph. Applies to **cola** and **nota** alike — both already receive a plan; the restyle and the mandatory/optional rules apply to both.
 
 ## Endpoints / flow
 
