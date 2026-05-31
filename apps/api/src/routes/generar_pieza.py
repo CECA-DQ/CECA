@@ -584,6 +584,11 @@ def _plan_to_grafismos(
                 texto_secundario=str(g.get("texto_secundario", "")),
                 tiempo_inicio=t0,
                 duracion=min(dur, video_duration - t0),
+                obligatorio=bool(g.get("obligatorio", False)),
+                visible=bool(g.get("visible", True)),
+                ancla=str(g.get("ancla", "")),
+                color_barra=str(g.get("color_barra", "")),
+                etiqueta=str(g.get("etiqueta", "")),
             ))
 
         current_t += seg_dur
